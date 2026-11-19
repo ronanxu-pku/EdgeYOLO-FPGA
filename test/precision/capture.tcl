@@ -58,7 +58,6 @@ proc capture_dcim_precision {python mode runDir workerArgs} {
         set data [upload_hw_ila_data $ila]
         write_hw_ila_data [file join $runDir precision.ila] $data
         write_hw_ila_data -csv_file [file join $runDir precision.csv] $data
-        write_hw_ila_data -vcd_file [file join $runDir precision.vcd] $data
     } captureLog]
     if {$captureFailed} { puts stderr "ILA capture failed: $captureLog" }
     if {$hostFailed} { error "XDMA check failed. See $runDir/host.log." }

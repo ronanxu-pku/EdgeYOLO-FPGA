@@ -1,4 +1,4 @@
-"""Run FPGA precision tests and export hardware ILA waveforms."""
+"""Run FPGA precision tests and open the native Vivado ILA waveforms."""
 from __future__ import annotations
 
 import argparse
@@ -7,8 +7,11 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
+import xml.etree.ElementTree as ET
 from datetime import datetime
 from pathlib import Path
+from zipfile import BadZipFile, ZipFile
 
 import numpy as np
 
@@ -124,19 +127,104 @@ def find_vivado(override: str | None) -> str:
     raise FileNotFoundError("Vivado Lab or Vivado was not found. Use --vivado with the launcher path.")
 
 
+DATA_PROBES = (
+    "prec_act_slice",
+    "prec_weight_slices",
+    "prec_partial_products",
+    "prec_column_sums",
+    "prec_phase_acc",
+    "prec_result_ch0",
+)
+
+
+def native_wave_config(capture: Path, destination: Path) -> None:
+    with ZipFile(capture) as archive:
+        configs = [name for name in archive.namelist() if name.lower().endswith(".wcfg")]
+        if len(configs) != 1:
+            raise ValueError(f"Expected one native wave configuration in {capture}")
+        config = ET.fromstring(archive.read(configs[0]))
+
+    rows = {}
+    for wave in config.iter("wvobject"):
+        names = [wave.get("fp_name", "")]
+        names.extend(prop.text or "" for prop in wave.findall("obj_property")
+                     if prop.get("name") in {"ObjectShortName", "ElementShortName"})
+        for name in names:
+            probe = name.rsplit("/", 1)[-1].split("[", 1)[0]
+            if probe in DATA_PROBES:
+                rows[probe] = wave
+                break
+    if len(rows) != len(DATA_PROBES):
+        missing = ", ".join(probe for probe in DATA_PROBES if probe not in rows)
+        raise ValueError(f"Missing native waveform rows in {capture}: {missing}")
+
+    for wave in config.findall("wvobject"):
+        config.remove(wave)
+    for probe in DATA_PROBES:
+        config.append(rows[probe])
+    size = config.find("WVObjectSize")
+    if size is not None:
+        size.set("size", str(len(DATA_PROBES)))
+
+    # Native ILA wave configs use one fs per sample when the full window ends at 1025 fs.
+    zoom_end = config.find("zoom_setting/ZoomEndTime")
+    if zoom_end is not None and zoom_end.get("time") in {"1023fs", "1024fs", "1025fs"}:
+        for element, sample in (("ZoomStartTime", 28), ("ZoomEndTime", 54), ("Cursor1Time", 32)):
+            node = config.find(f"zoom_setting/{element}")
+            if node is not None:
+                node.set("time", f"{sample}fs")
+
+    ET.ElementTree(config).write(destination, encoding="utf-8", xml_declaration=True)
+
+
+def run_vivado(vivado: str, script: Path, cwd: Path, env: dict, mode: str):
+    flags = ["-mode", mode, "-source", str(script), "-notrace", "-nolog", "-nojournal"]
+    executable = None
+    command = [vivado, *flags]
+    if Path(vivado).suffix.lower() in {".bat", ".cmd"}:
+        env.update(DCIM_PRECISION_VIVADO=vivado, DCIM_PRECISION_SCRIPT=str(script))
+        executable = os.environ["COMSPEC"]
+        command = (
+            f'cmd.exe /d /v:off /s /c ""%DCIM_PRECISION_VIVADO%" -mode {mode} '
+            '-source "%DCIM_PRECISION_SCRIPT%" -notrace -nolog -nojournal"'
+        )
+    return subprocess.run(command, executable=executable, cwd=cwd, env=env,
+                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                          text=True, errors="replace")
+
+
+def open_native_waveforms(vivado: str, run_dir: Path, cases: tuple[str, ...]) -> int:
+    captures = {}
+    for case in cases:
+        path = run_dir / f"{case}.ila"
+        if not path.is_file():
+            path = run_dir / case / "precision.ila"
+        if not path.is_file():
+            raise FileNotFoundError(path)
+        captures[case] = path
+
+    with tempfile.TemporaryDirectory(prefix="dcim_ila_view_") as scratch:
+        work = Path(scratch)
+        for case, path in captures.items():
+            native_wave_config(path, work / f"{case}.wcfg")
+            shutil.copyfile(path, work / f"{case}.ila")
+        env = dict(os.environ, DCIM_PRECISION_VIEW_CASES=" ".join(cases))
+        opened = run_vivado(vivado, Path(__file__).with_name("view.tcl").resolve(), work, env, "gui")
+        if opened.returncode:
+            print("\n".join(opened.stdout.splitlines()[-20:]), file=sys.stderr)
+        return opened.returncode
+
+
 def capture_on_board(args: argparse.Namespace, cases: tuple[str, ...], run_dir: Path) -> int:
     vivado = find_vivado(args.vivado)
-    script = Path(__file__).with_name("capture.tcl").resolve()
     ltx = ROOT / "bitstream/top_precision.ltx"
     if not ltx.is_file():
         raise FileNotFoundError(ltx)
+    if run_dir.exists():
+        raise FileExistsError(run_dir)
 
-    run_dir.mkdir(parents=True, exist_ok=False)
-    print(f"FPGA capture directory: {run_dir}", flush=True)
     env = dict(
         os.environ,
-        DCIM_PRECISION_VIVADO=vivado,
-        DCIM_PRECISION_SCRIPT=str(script),
         DCIM_PRECISION_PYTHON=sys.executable,
         DCIM_PRECISION_LTX=str(ltx),
         DCIM_PRECISION_CASES=" ".join(cases),
@@ -147,29 +235,29 @@ def capture_on_board(args: argparse.Namespace, cases: tuple[str, ...], run_dir: 
     )
     for name in ("PATH", "PYTHONHOME", "PYTHONPATH"):
         env[f"DCIM_PRECISION_HOST_{name}"] = os.environ.get(name, "")
-    flags = ["-mode", "batch", "-source", str(script), "-notrace", "-nojournal", "-log", "vivado.log"]
-    if Path(vivado).suffix.lower() in {".bat", ".cmd"}:
-        # Keep paths in quoted environment expansions and pass only fixed shell text.
-        command = (
-            'cmd.exe /d /v:off /s /c ""%DCIM_PRECISION_VIVADO%" -mode batch '
-            '-source "%DCIM_PRECISION_SCRIPT%" -notrace -nojournal -log vivado.log"'
-        )
-        completed = subprocess.run(command, executable=os.environ["COMSPEC"], cwd=run_dir, env=env)
-    else:
-        completed = subprocess.run([vivado, *flags], cwd=run_dir, env=env)
+    script = Path(__file__).with_name("capture.tcl").resolve()
+    with tempfile.TemporaryDirectory(prefix="dcim_ila_capture_") as scratch:
+        work = Path(scratch)
+        completed = run_vivado(vivado, script, work, env, "batch")
+        if completed.returncode:
+            print("\n".join(completed.stdout.splitlines()[-24:]), file=sys.stderr)
+            return completed.returncode
 
-    if completed.returncode:
-        print(f"FPGA capture failed. See {run_dir / 'vivado.log'} and the case host.log.", file=sys.stderr)
-        return completed.returncode
+        results = {}
+        for case in cases:
+            folder = work / case
+            result = json.loads((folder / "waveform_check.json").read_text(encoding="utf-8"))
+            if result.get("case") != case or result.get("pass") is not True or not (folder / "precision.ila").is_file():
+                raise RuntimeError(f"Incomplete or failed FPGA capture for {case}")
+            results[case] = result
 
-    for case in cases:
-        folder = run_dir / case
-        result = json.loads((folder / "waveform_check.json").read_text(encoding="utf-8"))
-        waveform = folder / "waveform.svg"
-        if result.get("case") != case or result.get("pass") is not True or not waveform.is_file():
-            raise RuntimeError(f"Incomplete or failed FPGA capture for {case}: {folder}")
-        print(f"FPGA PASS {case}: {waveform}")
-    return 0
+        run_dir.mkdir(parents=True, exist_ok=False)
+        for case, result in results.items():
+            path = run_dir / f"{case}.ila"
+            shutil.copyfile(work / case / "precision.ila", path)
+            print(f"FPGA PASS {case}: {result['actual_hex']}  {path}", flush=True)
+
+    return open_native_waveforms(vivado, run_dir, cases)
 
 
 def main() -> int:
@@ -178,6 +266,8 @@ def main() -> int:
     parser.add_argument("--run-dir", type=Path)
     execution = parser.add_mutually_exclusive_group()
     execution.add_argument("--prepare-only", action="store_true")
+    execution.add_argument("--view-only", type=Path, metavar="CAPTURE_DIR",
+                           help="Open a saved run in the native Vivado waveform viewer")
     execution.add_argument("--xdma-only", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--vivado", help="Path to vivado_lab.bat or vivado.bat")
     parser.add_argument("--hw-server", default="localhost:3121")
@@ -195,6 +285,8 @@ def main() -> int:
     run_dir = (args.run_dir or out / f"{args.case}_{datetime.now():%Y%m%d_%H%M%S_%f}").resolve()
 
     try:
+        if args.view_only:
+            return open_native_waveforms(find_vivado(args.vivado), args.view_only.resolve(), cases)
         if args.xdma_only:
             return run_xdma(args.case, run_dir, args.timeout_s, args.quiet_xdma)
         if args.prepare_only:
@@ -206,7 +298,7 @@ def main() -> int:
                 print(f"Prepared {case}: {folder}")
             return 0
         return capture_on_board(args, cases, run_dir)
-    except (OSError, RuntimeError, ValueError) as error:
+    except (OSError, RuntimeError, ValueError, BadZipFile, ET.ParseError) as error:
         print(f"Precision test failed: {error}", file=sys.stderr)
         return 1
 

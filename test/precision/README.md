@@ -12,9 +12,15 @@
 python test/precision/run.py
 ~~~
 
-`run.py` 会启动批处理版 Vivado，加载配对的 [top_precision.ltx](../../bitstream/top_precision.ltx)，arm ILA 后才通过 XDMA 发任务和读取 OBUF。输出位于 `test/precision/output/<本次运行>/<测例>/`。每个测例保存原始 `precision.ila`、`precision.csv`、`precision.vcd`、主机回读 `readback.json`、逐拍数据 `phase_trace.csv` 和可插入 PPT 的 `waveform.svg`。主机回读和全部阶段均通过时，命令会打印 `FPGA PASS` 和波形路径。
+`run.py` 通过 XDMA 下发任务并校验 ILA 采样。通过后，默认只在 `test/precision/output/<本次运行>/` 保存 `int8.ila` 和 `int16.ila`，并在 Vivado Lab 打开两个原生波形标签。波形按输入、部分积、列和、移位累加、写回排列。保存到 PPT 时直接截取原生波形窗口。
 
-只测一项可加 `--case int8`、`--case int16` 或 `--case int16-high`。Vivado 在自定义路径时传 `--vivado <启动器路径>`。多个 JTAG 目标可用 `--hw-target <目标名称>` 指定。
+在已有采样上打开相同的原生视图。
+
+~~~powershell
+python test/precision/run.py --view-only <本次运行目录>
+~~~
+
+只测一项或只看一项可加 `--case int8`、`--case int16` 或 `--case int16-high`。Vivado 在自定义路径时传 `--vivado <启动器路径>`。多个 JTAG 目标可用 `--hw-target <目标名称>` 指定。
 
 ## 测例
 
@@ -38,14 +44,11 @@ python test/precision/run.py
 
 采样时钟 250 MHz，深度 1024，触发位置 32，触发条件 `prec_stage_valid[0] == 1`。INT8 读取物理列 0–1 和写回低 32 位。INT16 读取物理列 0–3 和完整 64 位。最低位切片对应第 0 物理列。
 
-## 离线生成或复验
+## 离线生成激励
 
-从仓库根目录运行，`--run-dir` 可指定新目录。
+从仓库根目录运行。`--prepare-only` 只生成板测输入、指令和参考值。
 
 ~~~powershell
 python test/precision/run.py --case int8 --prepare-only
 python test/precision/run.py --case int16 --prepare-only
-python test/precision/check_capture.py C:/work/captures/int16_run01
 ~~~
-
-`--prepare-only` 只生成板测输入、指令和参考值。复验需要采集目录里已有 `readback.json` 和 `precision.csv`。

@@ -1,7 +1,6 @@
 """Verify all seven FPGA ILA probe buses against the selected precision case."""
 import argparse
 import csv
-from html import escape
 import json
 import re
 from pathlib import Path
@@ -78,7 +77,6 @@ def verify(case, stages):
     out_cycle, raw = stages[-1][0]
     width = case["output_bits"]
     actual = signed(raw & ((1 << width) - 1), width)
-    summary = []
     acc = 0
     for i, (issue, product, column, update) in enumerate(zip(*stages[:4], strict=True)):
         issue_t, act_slice, weight_slices = issue
@@ -91,7 +89,6 @@ def verify(case, stages):
         if not issue_t < product_t < column_t < update_t < out_cycle:
             raise ValueError(f"Invalid stage ordering at phase {i}")
         act = signed(act_slice, 4) if i == 0 else act_slice
-        decoded_products = []
         decoded_sums = []
         for j in range(count):
             nibble = (weight_slices >> (j * 4)) & 15
@@ -102,72 +99,14 @@ def verify(case, stages):
                 raise ValueError(f"Partial product mismatch at phase {i}, weight slice {j}")
             if (sums >> (j * 14)) & 16383 != col & 16383:
                 raise ValueError(f"Column sum mismatch at phase {i}, weight slice {j}")
-            decoded_products.append(pp)
             decoded_sums.append(col)
         contribution = sum(value << (4 * j) for j, value in enumerate(decoded_sums))
         acc = 16 * acc + contribution
         if signed(phase_acc, 48) != acc:
             raise ValueError(f"Merge accumulator mismatch at phase {i}")
-        summary.append([i, issue_t-origin, f"{act_slice:X}", act, f"{weight_slices:04X}",
-                        product_t-origin, decoded_products, column_t-origin, decoded_sums,
-                        contribution, update_t-origin, acc])
     if acc != actual or actual != case["expected"]:
         raise ValueError(f"Result mismatch: ILA={actual}, merged={acc}, expected={case['expected']}")
-    return summary, out_cycle - origin, actual
-
-
-def write_waveform(path, case, phases, write_cycle, actual):
-    """Render each valid sample into a one-cycle box on a shared time axis."""
-    cols = case["operand_bits"] // 4
-    tracks = [
-        ("Activation phase / slice", [(p[1], 1, f"{p[0]} / {p[2]}") for p in phases], "#17618e"),
-        ("Weight slices", [(0, len(phases), "0x" + phases[0][4][-cols:])], "#17618e"),
-    ]
-    tracks.extend((f"4 x 4 product w{j}", [(p[5], 1, str(p[6][j])) for p in phases], "#17618e")
-                  for j in range(cols))
-    tracks.extend((f"Adder tree column w{j}", [(p[7], 1, str(p[8][j])) for p in phases], "#654297")
-                  for j in range(cols))
-    tracks.extend([
-        ("Weighted phase contribution", [(p[10], 1, str(p[9])) for p in phases], "#654297"),
-        ("Accumulator after phase", [(p[10], 1, str(p[11])) for p in phases], "#654297"),
-        ("OBUF channel 0 write", [(write_cycle, 1, "")], "#00745e"),
-    ])
-    origin = 276
-    step = 74
-    extent = write_cycle + 4
-    bottom = 116 + len(tracks) * 31
-    width = origin + extent * step + 30
-    height = bottom + 54
-    svg = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">',
-           '<rect width="100%" height="100%" fill="white"/>',
-           '<g font-family="Arial, sans-serif" fill="#14263b">']
-
-    def label(x, y, value, size=16, color="#14263b", anchor="start"):
-        svg.append(f'<text x="{x}" y="{y}" font-size="{size}" fill="{color}" text-anchor="{anchor}">'
-                   f'{escape(str(value))}</text>')
-
-    source = case.get("sample_source", "FPGA ILA")
-    label(25, 37, f"{source}  |  {case['case'].upper()}  |  Tile 0 / output channel 0", 25)
-    label(25, 70, f"A = {case['activation']:,}    W = {case['weight']:,}    "
-                  f"Active inputs = {case['active_inputs']}    Clock = 250 MHz", 17)
-    for cycle in range(extent):
-        x = origin + cycle * step
-        svg.append(f'<line x1="{x}" y1="88" x2="{x}" y2="{bottom}" stroke="#e3e9f0"/>')
-        label(x, bottom + 18, cycle, 13, anchor="middle")
-    for i, (name, values, color) in enumerate(tracks):
-        y = 110 + i * 31
-        label(25, y + 6, name)
-        svg.append(f'<line x1="{origin}" y1="{y}" x2="{width-30}" y2="{y}" stroke="#b6c5d4"/>')
-        for cycle, length, text in values:
-            x = origin + cycle * step
-            svg.append(f'<rect x="{x}" y="{y-12}" width="{length*step-1}" height="24" rx="2" fill="{color}"/>')
-            if text:
-                label(x + length * step / 2, y + 5, text, 12 if len(text) > 8 else 15,
-                      "white", "middle")
-    x = origin + (write_cycle + 1) * step + 6
-    label(x, 116 + (len(tracks)-1) * 31, f"{actual:,} / PASS", 17, "#00745e")
-    label(origin, bottom + 42, "DCIM sample cycle from first input accept", 15)
-    path.write_text("\n".join(svg + ["</g></svg>"]) + "\n", encoding="utf-8")
+    return out_cycle - origin, actual
 
 
 def main():
@@ -177,19 +116,12 @@ def main():
     case = json.loads((folder / "readback.json").read_text(encoding="utf-8"))
     if not case["pass"]:
         raise ValueError("Host readback did not pass")
-    phases, cycle, actual = verify(case, read_stages(folder / "precision.csv"))
+    cycle, actual = verify(case, read_stages(folder / "precision.csv"))
     if actual != case["actual"]:
         raise ValueError("ILA and host readback disagree")
-    with (folder / "phase_trace.csv").open("w", newline="", encoding="ascii") as stream:
-        out = csv.writer(stream)
-        out.writerow(["phase", "input_cycle", "activation_hex", "activation_value", "weight_hex",
-                      "multiply_cycle", "products", "column_cycle", "column_sums",
-                      "phase_contribution", "accumulate_cycle", "accumulated"])
-        out.writerows(phases)
     result = {"case": case["case"], "write_cycle": cycle, "actual": actual,
               "actual_hex": case["actual_hex"], "expected": case["expected"], "pass": True}
     (folder / "waveform_check.json").write_text(json.dumps(result, indent=2) + "\n")
-    write_waveform(folder / "waveform.svg", case, phases, cycle, actual)
     print(f"ILA PASS {case['case']}: cycle {cycle}, result {case['actual_hex']} ({actual})")
 
 
