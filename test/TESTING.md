@@ -1,6 +1,14 @@
 # 测试说明与实测记录
 
-仓库根目录 `top.bit` / `top.ltx` 是当前烧录与 ILA 文件。测试分三组，产物写在各自目录、不进 Git。
+精度版烧录与采样使用 [top.bit](../bitstream/top.bit) 和 [top_precision.ltx](../bitstream/top_precision.ltx)。测试产物写在各自目录。
+
+## 恢复峰值版烧录文件
+
+网络、峰值 TOPS 和旧版随机矩阵脚本使用此前提交的峰值版 `top.bit` 和 `top.ltx`。运行这些测试前，在仓库根目录恢复配对文件：
+
+```powershell
+git restore --source=ca47abbe1fbb676cdaf0c737f8d4187cccfbb38c --worktree -- top.bit top.ltx
+```
 
 ```text
 test/network/output/    编译缓存、验收报告、推理图、golden cache
@@ -15,7 +23,7 @@ python -m pip install -r requirements-fpga-runtime.txt
 python test/network/run.py --self-check
 ```
 
-当前 bitstream：`top.bit`，84 989 276 字节，SHA256 `93d0ff5f8388a1238d63d189b65adfaa8f34cd73ae5908e70be4d10351757b06`。
+上述峰值版 `top.bit` 有 84 989 276 字节，SHA256 `93d0ff5f8388a1238d63d189b65adfaa8f34cd73ae5908e70be4d10351757b06`。
 
 ---
 
@@ -90,7 +98,9 @@ python project/compiler/check_release_repro.py
 
 ## 计算精度（INT8 / INT16 矩阵乘）
 
-脚本在 `test/precision/`。用随机 INT8×INT8 和 INT16×INT16 测例做主机回读；片上波形用现成 `top.ltx` 的 `peak_phase`（INT8 每 job 2 拍，INT16 每 job 4 拍）。测例 **8 个 tile 全开**，ILA 触发与峰值相同：`peak_compute_mask == 8'hFF`。
+完整计算过程用 [精度 ILA](tops/fpga/README.md#int8--int16-精度-ila) 采样，覆盖输入分片、部分积、列和、移位累加及写回。
+
+下面的随机 INT8/INT16 矩阵回读脚本使用上面恢复的峰值版。它启用 8 个 Tile，并按 `peak_compute_mask == 8'hFF` 触发。
 
 ```powershell
 python test/precision/run.py --prepare-only --seed 20260822
@@ -104,7 +114,7 @@ python test/precision/run.py --mode int16 --seed 20260822
 
 ## 峰值 TOPS
 
-脚本在 `test/tops/`。先烧 `top.bit`；算 TOPS 还需 Vivado 打开 `top.ltx` 并 arm ILA。
+脚本在 `test/tops/`。先按上文恢复峰值版，烧录 `top.bit` 后用配对的 `top.ltx` arm ILA。
 
 ```powershell
 python test/tops/fpga/run.py --staging hbm --quiet-xdma --repeat-count 1

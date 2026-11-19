@@ -3,7 +3,7 @@
 ## 前提
 
 - Windows XDMA 驱动已枚举设备；
-- FPGA 加载当前 streamed RTL 生成的 `.bit`；
+- FPGA 使用 [此前提交的峰值版](../../TESTING.md#恢复峰值版烧录文件) 或同配置重新综合生成的 `.bit`；
 - Hardware Manager 加载同一次实现的 `.ltx`；
 - 实际 DCIM 时钟频率已知，目标为 250 MHz。
 
@@ -163,3 +163,9 @@ timing 状态、WNS、WHS 选择获胜项，只对 winner 发布统一的 `post_
 `output/tops/fpga/dcim_stream_ooc_timingopt5/`：0 error、0 critical warning，
 `WNS=+1.741 ns @ 250 MHz`，最大普通信号扇出748。与repeat功能基线相比，CLB LUT
 减少19.37%、CLB Register减少23.83%，DSP/BRAM/URAM数量不变。
+
+## INT8 / INT16 精度 ILA
+
+VCU128 精度测试使用 [top.bit](../../../bitstream/top.bit) 和同次实现的 [top_precision.ltx](../../../bitstream/top_precision.ltx)。在 Vivado Hardware Manager 里配对加载这两个文件。
+
+`precision_ila` 以 250 MHz 采样 Tile 0 的 7 组探针。INT8 和 INT16 共用探针，可逐拍观察输入分片、部分积、列和、移位累加和 OBUF 写回。触发条件为 `prec_stage_valid[0] == 1`。

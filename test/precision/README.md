@@ -1,16 +1,22 @@
 # 计算精度上板（INT8 / INT16）
 
+完整计算过程使用 [精度版 bitstream](../../bitstream/top.bit) 和配对的 [top_precision.ltx](../../bitstream/top_precision.ltx)。探针和触发条件见 [精度 ILA 说明](../tops/fpga/README.md#int8--int16-精度-ila)。
+
+## 旧版随机矩阵回读
+
+以下脚本和六探针波形流程使用 [此前提交的峰值版](../TESTING.md#恢复峰值版烧录文件)。
+
 本项证明 FPGA 存内计算阵列能做 **INT8×INT8** 和 **INT16×INT16**。
 证据分两路，缺一不可：
 
 1. **主机回读**：随机输入与权重送上板，读回乘加结果，与 Python golden 逐字一致。
-2. **片上波形**：用仓库根目录现成的 `top.ltx` 抓 ILA。当前探针已经能看出走的是 8 位还是 16 位数据通路，**不必为精度测试重做 bitstream**。
+2. **片上波形**：用恢复到仓库根目录的峰值版 `top.ltx` 采集 ILA，观察 INT8 和 INT16 的输入相位及结果低 32 位。
 
 网络端到端（YOLO / ResNet）只能说明应用层数值对，不能单独当作“片上确实按 INT16 相位在乘”的波形证据。峰值测试 `test/tops` 只覆盖 INT8。本目录补上随机矩阵乘。
 
-## 现有 LTX 够不够？
+## 旧版峰值 ILA 探针
 
-够。`top.ltx` 对应 `peak_tops_ila`，接到 DCIM 阵列，六个探针：
+旧版 `top.ltx` 对应 `peak_tops_ila`，接到 DCIM 阵列，六个探针：
 
 | 探针 | 信号 | 精度测试里看什么 |
 | --- | --- | --- |

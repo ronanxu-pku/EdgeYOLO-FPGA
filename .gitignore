@@ -12,10 +12,6 @@
 !Makefile
 !makefile
 
-# Deployment image at repo root
-!/top.bit
-!/top.ltx
-
 # Source and tests
 !project/
 !project/**/
@@ -104,9 +100,9 @@ logs/**
 *.runs/
 /bd/
 
-# Re-allow the two root programming files after the generic *.bit/*.ltx ignore.
-!/top.bit
-!/top.ltx
+# Shipped precision programming pair.
+!/bitstream/top.bit
+!/bitstream/top_precision.ltx
 
 # Downloaded / extra model packages
 weihgts/
