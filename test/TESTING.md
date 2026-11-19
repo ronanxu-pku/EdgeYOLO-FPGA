@@ -4,7 +4,7 @@
 
 ## 恢复峰值版烧录文件
 
-网络、峰值 TOPS 和旧版随机矩阵脚本使用此前提交的峰值版 `top.bit` 和 `top.ltx`。运行这些测试前，在仓库根目录恢复配对文件：
+网络和峰值 TOPS 脚本使用此前提交的峰值版 `top.bit` 和 `top.ltx`。运行这些测试前，在仓库根目录恢复配对文件：
 
 ```powershell
 git restore --source=ca47abbe1fbb676cdaf0c737f8d4187cccfbb38c --worktree -- top.bit top.ltx
@@ -98,17 +98,13 @@ python project/compiler/check_release_repro.py
 
 ## 计算精度（INT8 / INT16 矩阵乘）
 
-完整计算过程用 [精度 ILA](tops/fpga/README.md#int8--int16-精度-ila) 采样，覆盖输入分片、部分积、列和、移位累加及写回。
+在接板 Windows 主机从仓库根目录运行。脚本自动启动 Vivado 并通过 XDMA 发 INT8、INT16 任务，逐拍校验并导出完整片上波形。
 
-下面的随机 INT8/INT16 矩阵回读脚本使用上面恢复的峰值版。它启用 8 个 Tile，并按 `peak_compute_mask == 8'hFF` 触发。
+~~~powershell
+python test/precision/run.py
+~~~
 
-```powershell
-python test/precision/run.py --prepare-only --seed 20260822
-python test/precision/run.py --mode int8 --seed 20260822
-python test/precision/run.py --mode int16 --seed 20260822
-```
-
-步骤和判定见 [`test/precision/README.md`](precision/README.md)。
+镜像、探针和输出路径见 [精度测试说明](precision/README.md)。
 
 ---
 

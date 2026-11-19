@@ -169,3 +169,5 @@ timing 状态、WNS、WHS 选择获胜项，只对 winner 发布统一的 `post_
 VCU128 精度测试使用 [top.bit](../../../bitstream/top.bit) 和同次实现的 [top_precision.ltx](../../../bitstream/top_precision.ltx)。在 Vivado Hardware Manager 里配对加载这两个文件。
 
 `precision_ila` 以 250 MHz 采样 Tile 0 的 7 组探针。INT8 和 INT16 共用探针，可逐拍观察输入分片、部分积、列和、移位累加和 OBUF 写回。触发条件为 `prec_stage_valid[0] == 1`。
+
+测试向量、采集命令和导出文件见 [计算精度上板](../../precision/README.md)。

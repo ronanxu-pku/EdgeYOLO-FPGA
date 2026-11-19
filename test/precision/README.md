@@ -1,82 +1,51 @@
-# 计算精度上板（INT8 / INT16）
+# INT8 / INT16 片上计算精度
 
-完整计算过程使用 [精度版 bitstream](../../bitstream/top.bit) 和配对的 [top_precision.ltx](../../bitstream/top_precision.ltx)。探针和触发条件见 [精度 ILA 说明](../tops/fpga/README.md#int8--int16-精度-ila)。
+在 VCU128 的 Tile 0 只发一个任务，逐拍检查输入、4×4 部分积、列和、移位累加和 OBUF 写回。两种精度共用同一组 225 位探针。
 
-## 旧版随机矩阵回读
+## 实机测试
 
-以下脚本和六探针波形流程使用 [此前提交的峰值版](../TESTING.md#恢复峰值版烧录文件)。
+在接有 VCU128 JTAG 和 XDMA 的 Windows 主机运行。板卡需已烧录 [bitstream/top.bit](../../bitstream/top.bit)，主机需装有 XDMA 驱动、Python 和 NumPy，以及 Vivado Lab 或 Vivado。
 
-本项证明 FPGA 存内计算阵列能做 **INT8×INT8** 和 **INT16×INT16**。
-证据分两路，缺一不可：
+从仓库根目录执行，默认依次测试 INT8 和 INT16。
 
-1. **主机回读**：随机输入与权重送上板，读回乘加结果，与 Python golden 逐字一致。
-2. **片上波形**：用恢复到仓库根目录的峰值版 `top.ltx` 采集 ILA，观察 INT8 和 INT16 的输入相位及结果低 32 位。
+~~~powershell
+python test/precision/run.py
+~~~
 
-网络端到端（YOLO / ResNet）只能说明应用层数值对，不能单独当作“片上确实按 INT16 相位在乘”的波形证据。峰值测试 `test/tops` 只覆盖 INT8。本目录补上随机矩阵乘。
+`run.py` 会启动批处理版 Vivado，加载配对的 [top_precision.ltx](../../bitstream/top_precision.ltx)，arm ILA 后才通过 XDMA 发任务和读取 OBUF。输出位于 `test/precision/output/<本次运行>/<测例>/`。每个测例保存原始 `precision.ila`、`precision.csv`、`precision.vcd`、主机回读 `readback.json`、逐拍数据 `phase_trace.csv` 和可插入 PPT 的 `waveform.svg`。主机回读和全部阶段均通过时，命令会打印 `FPGA PASS` 和波形路径。
 
-## 旧版峰值 ILA 探针
-
-旧版 `top.ltx` 对应 `peak_tops_ila`，接到 DCIM 阵列，六个探针：
-
-| 探针 | 信号 | 精度测试里看什么 |
-| --- | --- | --- |
-| 0 | `peak_compute_mask[7:0]` | 8 个 tile 同时在算时应为 `8'hFF`。触发用 **`== 8'hFF`**，与峰值测试相同 |
-| 1 | `peak_dcim_input[31:0]` | 该拍送进阵列的输入低 32bit |
-| 2 | `peak_job[5:0]` | 像素/job 编号，本测例 0..7 |
-| 3 | `peak_phase[1:0]` | **关键**。INT8 每个 job 只走 0、1 两拍（两个 4bit 相位拼一个 INT8）；INT16 每个 job 走 0、1、2、3 四拍（四个 4bit 相位拼一个 INT16） |
-| 4 | `peak_result_valid` | 该拍写出结果 |
-| 5 | `peak_result_data[31:0]` | 结果低 32bit，应与 `expected_ila.json` 里的 `probe5_first_result_low32` 一致 |
-
-阵列把整数拆成 4bit 串行乘加：INT8 两拍，INT16 四拍。波形上 **phase 长度不同**，就是两种精度的片上证据。ILA 没有直接引出 mode 寄存器，不需要；phase 已经由 mode 决定。
+只测一项可加 `--case int8`、`--case int16` 或 `--case int16-high`。Vivado 在自定义路径时传 `--vivado <启动器路径>`。多个 JTAG 目标可用 `--hw-target <目标名称>` 指定。
 
 ## 测例
 
-随机向量由 `golden_module_tb.py` 按 `--seed` 生成：
+| 测例 | 输入 | 预期写回 |
+| --- | --- | --- |
+| `int8` | −93 × 109 | −10,137（`0xFFFFD867`） |
+| `int16` | 27,341 × −18,530 | −506,628,730（`0xFFFFFFFFE1CD7586`） |
+| `int16-high` | 4 个通道均为 −32,768 × −32,768 | 4,294,967,296（`0x0000000100000000`） |
 
-| 精度 | case | 随机内容 | 片上计算 |
-| --- | --- | --- | --- |
-| INT8 | `precision_int8_random` | 8 个像素的 INT8 输入，INT8 权重（满幅 -128..127） | INT8×INT8 → INT32 累加 |
-| INT16 | `precision_int16_random` | 8 个像素的 INT16 输入（满幅 -32768..32767），INT16 权重 | INT16×INT16 → INT64 累加 |
+## 探针
 
-同一 seed 可复现。产物在 `test/precision/output/<case>_seed<N>/`，含 `expected.hex`、`expected_ila.json`。
+| ILA | 信号 | 位宽 | 采样原因 |
+| --- | --- | ---: | --- |
+| probe0 | `prec_stage_valid` | 5 | 标记输入、乘积、列和、累加、写回五个有效阶段。 |
+| probe1 | `prec_act_slice` | 4 | 核对每拍从高到低送入的激活分片。 |
+| probe2 | `prec_weight_slices` | 16 | 核对对应物理列的权重分片。 |
+| probe3 | `prec_partial_products` | 32 | 核对第 0 输入通道在各列的 4×4 乘积。 |
+| probe4 | `prec_column_sums` | 56 | 核对各列加法树输出。 |
+| probe5 | `prec_phase_acc` | 48 | 核对每拍移位加和后的累加值。 |
+| probe6 | `prec_result_ch0` | 64 | 核对通道 0 的 OBUF 写回，并和主机回读比较。 |
 
-## 步骤
+采样时钟 250 MHz，深度 1024，触发位置 32，触发条件 `prec_stage_valid[0] == 1`。INT8 读取物理列 0–1 和写回低 32 位。INT16 读取物理列 0–3 和完整 64 位。最低位切片对应第 0 物理列。
 
-一律在仓库根目录。FPGA 已烧 `top.bit`，Vivado Lab 加载配对的 `top.ltx`。
+## 离线生成或复验
 
-先只出向量，确认 ILA 期望：
+从仓库根目录运行，`--run-dir` 可指定新目录。
 
-```text
-python test/precision/run.py --prepare-only --seed 20260822
-```
+~~~powershell
+python test/precision/run.py --case int8 --prepare-only
+python test/precision/run.py --case int16 --prepare-only
+python test/precision/check_capture.py C:/work/captures/int16_run01
+~~~
 
-打开 Vivado Lab → Hardware Manager → 指定 `top.ltx`：
-
-- Data Depth 1024，Trigger Position 约 64
-- 触发：`peak_compute_mask == 8'hFF`
-- Arm ILA
-
-再上板（同一时刻只跑一路 XDMA）：
-
-```text
-python test/precision/run.py --mode int8 --seed 20260822
-python test/precision/run.py --mode int16 --seed 20260822
-```
-
-主机打印 `PASS_HOST_PENDING_ILA` 表示回读与 golden 一致。然后看波形：
-
-**INT8 必须同时满足**
-
-- 每个 `peak_job` 上 `peak_phase` 为 0 然后 1，再换下一个 job
-- `peak_result_valid=1` 时，`peak_result_data` 的第一个有效值等于该目录 `expected_ila.json` 的 `probe5_first_result_low32`
-
-**INT16 必须同时满足**
-
-- 每个 `peak_job` 上 `peak_phase` 为 0、1、2、3，再换下一个 job
-- 同样用 probe5 对照 `expected_ila.json`
-
-把两张波形截图放进中期报告即可：一张 INT8 两拍相位，一张 INT16 四拍相位。主机比对证明乘加数值正确，波形证明片上走了对应位宽的串行乘加。
-
-## 和峰值 ILA 的差别
-
-峰值脚本 `test/tops/fpga/run.py` 用 64 个 job、INT8、数周期算 TOPS。本测例同样 **8 tile 全开、同一触发 `8'hFF`**，但只有 8 个 job，并且多跑一组 INT16。INT8 波形上每个 job 两拍相位，INT16 每个 job 四拍。LTX 文件不用换。
+`--prepare-only` 只生成板测输入、指令和参考值。复验需要采集目录里已有 `readback.json` 和 `precision.csv`。
