@@ -203,13 +203,14 @@ def open_native_waveforms(vivado: str, run_dir: Path, cases: tuple[str, ...]) ->
             raise FileNotFoundError(f"No native {case} ILA archive under {run_dir}. Run run.py to capture it.")
         captures[case] = path
 
-    with tempfile.TemporaryDirectory(prefix="dcim_ila_view_") as scratch:
+    with tempfile.TemporaryDirectory(prefix="dcim_ila_view_", ignore_cleanup_errors=True) as scratch:
         work = Path(scratch)
         for case, path in captures.items():
             native_wave_config(path, work / f"{case}.wcfg")
             shutil.copyfile(path, work / f"{case}.ila")
-        env = dict(os.environ, DCIM_PRECISION_VIEW_CASES=" ".join(cases))
-        opened = run_vivado(vivado, Path(__file__).with_name("view.tcl").resolve(), work, env, "gui")
+        env = dict(os.environ, DCIM_PRECISION_VIEW_CASES=" ".join(cases), DCIM_PRECISION_VIEW_ROOT=str(work))
+        script = Path(__file__).with_name("view.tcl").resolve()
+        opened = run_vivado(vivado, script, Path(tempfile.gettempdir()), env, "gui")
         if opened.returncode:
             print("\n".join(opened.stdout.splitlines()[-20:]), file=sys.stderr)
         return opened.returncode
@@ -236,9 +237,11 @@ def capture_on_board(args: argparse.Namespace, cases: tuple[str, ...], run_dir: 
     for name in ("PATH", "PYTHONHOME", "PYTHONPATH"):
         env[f"DCIM_PRECISION_HOST_{name}"] = os.environ.get(name, "")
     script = Path(__file__).with_name("capture.tcl").resolve()
-    with tempfile.TemporaryDirectory(prefix="dcim_ila_capture_") as scratch:
+    with tempfile.TemporaryDirectory(prefix="dcim_ila_capture_", ignore_cleanup_errors=True) as scratch:
         work = Path(scratch)
-        completed = run_vivado(vivado, script, work, env, "batch")
+        env["DCIM_PRECISION_CAPTURE_ROOT"] = str(work)
+        # A Vivado hardware server can outlive the batch process and retain its cwd.
+        completed = run_vivado(vivado, script, Path(tempfile.gettempdir()), env, "batch")
         if completed.returncode:
             print("\n".join(completed.stdout.splitlines()[-24:]), file=sys.stderr)
             return completed.returncode

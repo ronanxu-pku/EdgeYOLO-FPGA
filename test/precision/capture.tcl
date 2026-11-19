@@ -91,7 +91,7 @@ if {[info exists ::env(DCIM_PRECISION_CASES)]} {
         set workerArgs [list --timeout-s $::env(DCIM_PRECISION_TIMEOUT)]
         if {$::env(DCIM_PRECISION_QUIET)} { lappend workerArgs --quiet-xdma }
         foreach mode $::env(DCIM_PRECISION_CASES) {
-            capture_dcim_precision $::env(DCIM_PRECISION_PYTHON) $mode [file join [pwd] $mode] $workerArgs
+            capture_dcim_precision $::env(DCIM_PRECISION_PYTHON) $mode [file join $::env(DCIM_PRECISION_CAPTURE_ROOT) $mode] $workerArgs
         }
     } finally {
         catch {close_hw_target}
