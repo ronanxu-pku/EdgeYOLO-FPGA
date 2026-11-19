@@ -1,6 +1,27 @@
 # Invoked by run.py in a batch Vivado session on the XDMA host.
 set ::precisionTestDir [file dirname [file normalize [info script]]]
 
+# Vivado sets its own Python environment. XDMA uses the host interpreter.
+proc run_precision_python {python args} {
+    set original [dict create]
+    set names {PATH PYTHONHOME PYTHONPATH}
+    foreach name $names {
+        if {[info exists ::env($name)]} { dict set original $name $::env($name) }
+        set value $::env(DCIM_PRECISION_HOST_$name)
+        if {$value eq ""} {
+            unset -nocomplain ::env($name)
+        } else {
+            set ::env($name) $value
+        }
+    }
+    try {
+        exec $python -X faulthandler {*}$args 2>@1
+    } finally {
+        foreach name $names { unset -nocomplain ::env($name) }
+        dict for {name value} $original { set ::env($name) $value }
+    }
+}
+
 proc capture_dcim_precision {python mode runDir workerArgs} {
     set runDir [file normalize $runDir]
     if {$mode ni {int8 int16 int16-high}} {
@@ -25,7 +46,7 @@ proc capture_dcim_precision {python mode runDir workerArgs} {
     set_property TRIGGER_COMPARE_VALUE {eq5'bXXXX1} $stage
     run_hw_ila $ila
     set hostFailed [catch {
-        exec $python [file join $::precisionTestDir run.py] --case $mode --run-dir $runDir --xdma-only {*}$workerArgs 2>@1
+        run_precision_python $python [file join $::precisionTestDir run.py] --case $mode --run-dir $runDir --xdma-only {*}$workerArgs
     } hostLog]
     file mkdir $runDir
     set logFile [open [file join $runDir host.log] w]
@@ -42,7 +63,7 @@ proc capture_dcim_precision {python mode runDir workerArgs} {
     if {$captureFailed} { puts stderr "ILA capture failed: $captureLog" }
     if {$hostFailed} { error "XDMA check failed. See $runDir/host.log." }
     if {$captureFailed} { error $captureLog }
-    puts [exec $python [file join $::precisionTestDir check_capture.py] $runDir]
+    puts [run_precision_python $python [file join $::precisionTestDir check_capture.py] $runDir]
 }
 
 if {[info exists ::env(DCIM_PRECISION_CASES)]} {

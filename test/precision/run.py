@@ -145,6 +145,8 @@ def capture_on_board(args: argparse.Namespace, cases: tuple[str, ...], run_dir: 
         DCIM_PRECISION_TIMEOUT=str(args.timeout_s),
         DCIM_PRECISION_QUIET=str(int(args.quiet_xdma)),
     )
+    for name in ("PATH", "PYTHONHOME", "PYTHONPATH"):
+        env[f"DCIM_PRECISION_HOST_{name}"] = os.environ.get(name, "")
     flags = ["-mode", "batch", "-source", str(script), "-notrace", "-nojournal", "-log", "vivado.log"]
     if Path(vivado).suffix.lower() in {".bat", ".cmd"}:
         # Keep paths in quoted environment expansions and pass only fixed shell text.
