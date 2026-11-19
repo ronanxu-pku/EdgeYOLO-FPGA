@@ -200,7 +200,7 @@ def open_native_waveforms(vivado: str, run_dir: Path, cases: tuple[str, ...]) ->
         if not path.is_file():
             path = run_dir / case / "precision.ila"
         if not path.is_file():
-            raise FileNotFoundError(path)
+            raise FileNotFoundError(f"No native {case} ILA archive under {run_dir}. Run run.py to capture it.")
         captures[case] = path
 
     with tempfile.TemporaryDirectory(prefix="dcim_ila_view_") as scratch:
@@ -247,14 +247,14 @@ def capture_on_board(args: argparse.Namespace, cases: tuple[str, ...], run_dir: 
         for case in cases:
             folder = work / case
             result = json.loads((folder / "waveform_check.json").read_text(encoding="utf-8"))
-            if result.get("case") != case or result.get("pass") is not True or not (folder / "precision.ila").is_file():
+            if result.get("case") != case or result.get("pass") is not True or not (folder / "capture.ila").is_file():
                 raise RuntimeError(f"Incomplete or failed FPGA capture for {case}")
             results[case] = result
 
         run_dir.mkdir(parents=True, exist_ok=False)
         for case, result in results.items():
             path = run_dir / f"{case}.ila"
-            shutil.copyfile(work / case / "precision.ila", path)
+            shutil.copyfile(work / case / "capture.ila", path)
             print(f"FPGA PASS {case}: {result['actual_hex']}  {path}", flush=True)
 
     return open_native_waveforms(vivado, run_dir, cases)
