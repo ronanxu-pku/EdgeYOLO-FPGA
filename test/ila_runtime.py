@@ -18,7 +18,9 @@ def parse_bus(value, radix, width):
     if match:
         return int(match[2], {"h": 16, "b": 2, "d": 10, "o": 8}[match[1]])
     base = {"BIN": 2, "BINARY": 2, "OCT": 8, "SIGNED": 10, "UNSIGNED": 10, "DEC": 10}.get(radix, 16)
-    if text.lower().startswith(("0x", "0b")):
+    prefix = text[:2].lower()
+    # In a HEX column, "0b..." can be an ordinary hexadecimal value.
+    if prefix == "0x" or (prefix == "0b" and base != 16):
         return int(text, 0)
     return int(text, base) & ((1 << width) - 1)
 
