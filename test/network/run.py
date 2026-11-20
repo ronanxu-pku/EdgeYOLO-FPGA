@@ -1,22 +1,19 @@
 """EdgeYOLO-FPGA 的自包含运行入口。
 
-新克隆的仓库已经包含唯一发布 bitstream、当前 PT/ONNX/解析模型以及 20+20 张
-测试图片，不需要另外下载或填写文件路径。编译与验收产物写到 ``test/network/output/``。
+仓库包含 PT/ONNX/解析模型以及 20+20 张测试图片。
+编译与验收产物写到 ``test/network/output/``。
 
 常用命令::
 
-    python test/network/run.py --self-check
-    python test/network/run.py --network yolo --precision int8 --num 1
-    python test/network/run.py --network yolo --precision int8 --num 1 --golden
-    python test/network/run.py --network resnet --precision int16 --num 1
-    python test/network/run.py --network all --precision both --num 20
+    python test/network/run.py --model yolo --precision int8 --num 1
+    python test/network/run.py --model resnet --precision int16 --num 1
+    python test/network/run.py --model all --precision both --num 20
 
-``--num 1`` 默认把 FPGA 特征与 golden cache 比对；加 ``--golden`` 则先跑 FPGA，
-再在主机计算 compiler golden 后比对。默认只打印检测结果和 ``result: same``；
-``--verbose`` 才输出 [win]/golden/路径等细节。
+启动时检查编译缓存，缺少产物时自动编译。FPGA 跑完后在主机计算 compiler golden 并比对。
+单图打印推理和比对结果。批量测试打印详细日志并生成验收报告。
 
-硬件运行仍要求 FPGA 已烧录仓库根目录的 top.bit，并已安装 Xilinx
-XDMA 驱动；这两项是板卡/驱动状态，不是仓库文件配置。Python 依赖见 README。
+硬件运行要求 FPGA 已烧录与网络测试兼容的设计，并已安装 Xilinx XDMA 驱动。
+Python 依赖见 README。
 """
 from __future__ import annotations
 
@@ -54,10 +51,9 @@ COCO_YOLO_DIR = REPO_ROOT / "project" / "model" / "yolov5n_coco50k_qat"
 EXAMPLES_DIR = REPO_ROOT / "test" / "network" / "examples"
 IMAGENET_MANIFEST = EXAMPLES_DIR / "imagenet" / "manifest.json"
 COCO_MANIFEST = EXAMPLES_DIR / "coco" / "manifest.json"
-BITSTREAM_PATH = REPO_ROOT / "top.bit"
-BITSTREAM_SHA256 = "93d0ff5f8388a1238d63d189b65adfaa8f34cd73ae5908e70be4d10351757b06"
-BITSTREAM_BYTES = 84989276
 MODEL_INPUTS_MANIFEST = REPO_ROOT / "project" / "model" / "model_inputs_manifest.json"
+XDMA_POLL_TIMEOUT_S = 240.0
+XDMA_READ_CHUNK_BYTES = 65536
 
 ONE_SHOT_DEFAULT_BUILDS = {
     ("resnet", "vai"): COMPILED_DIR / "resnet18_int8",
@@ -82,7 +78,6 @@ YOLO_ONE_SHOT_PROFILES = {
             "int8": COMPILED_DIR / "yolo_coco_int8",
             "int16": COMPILED_DIR / "yolo_coco_int16_native",
         },
-        "expect_detections": -1,
         "output_group": "yolo_coco",
     },
 }
@@ -218,16 +213,6 @@ def _one_shot_tag(network: str, precision: str) -> str:
     return precision
 
 
-def _normalize_cli_precision(value: str | None) -> str | None:
-    if value is None:
-        return None
-    if value in {"vai", "int8"}:
-        return "int8"
-    if value in {"int16", "int16_widened"}:
-        return "int16"
-    return value
-
-
 def _resnet_int16_internal() -> str:
     native = ONE_SHOT_COMPILE_PARSED[("resnet", "int16")] / "network.json"
     return "int16" if native.is_file() else "int16_widened"
@@ -246,18 +231,6 @@ def _expand_precisions(raw: str, network: str) -> list[str]:
     return mapped
 
 
-def _golden_cache_dir(args: argparse.Namespace) -> Path | None:
-    if getattr(args, "no_golden_cache", False):
-        return None
-    return OUT_DIR / "golden_cache"
-
-
-def _golden_mode(args: argparse.Namespace, *, single_shot: bool) -> str:
-    if getattr(args, "golden", False):
-        return "compute"
-    return "cache" if single_shot else "auto"
-
-
 def _hardware_mode(network: str, precision: str) -> str:
     if network == "resnet" and precision == "vai":
         return "int8"
@@ -266,8 +239,33 @@ def _hardware_mode(network: str, precision: str) -> str:
     return precision
 
 
-def _compile_one_shot_artifact(network: str, precision: str, build_dir: Path,
-                               parsed_override: Path | None = None) -> None:
+def _one_shot_cache_ready(build_dir: Path) -> bool:
+    try:
+        plan = json.loads((build_dir / "plan.json").read_text())
+        manifest_path = build_dir / "program_manifest.json"
+        if manifest_path.is_file():
+            segments = json.loads(manifest_path.read_text())["segments"]
+            if not segments or not all((build_dir / seg["bin"]).is_file() for seg in segments):
+                return False
+        else:
+            segment_count = plan.get("compile_meta", {}).get("program_segments", 1)
+            if segment_count > 1 or not (build_dir / "program.bin").is_file():
+                return False
+        for layout, filename in (("weights_layout", "weights.bin"), ("wb_layout", "wb.bin")):
+            if plan.get(layout, {}).get("layers") and not (build_dir / filename).is_file():
+                return False
+    except (FileNotFoundError, ValueError, KeyError, TypeError, AttributeError):
+        return False
+    return True
+
+
+def _ensure_one_shot_artifact(network: str, precision: str, build_dir: Path,
+                              parsed_dir: Path) -> None:
+    if _one_shot_cache_ready(build_dir):
+        return
+
+    label = f"{network.upper()} {_one_shot_tag(network, precision).upper()}"
+    print(f"  [compile] cache missing or incomplete in {build_dir}, compiling {label}", flush=True)
     compile_network = "yolov5n" if network == "yolo" else "resnet18"
     mode = _hardware_mode(network, precision)
     cmd = [
@@ -276,10 +274,8 @@ def _compile_one_shot_artifact(network: str, precision: str, build_dir: Path,
         "--mode", mode,
         "--full",
         "--out", str(build_dir),
+        "--parsed", str(parsed_dir),
     ]
-    parsed = parsed_override or ONE_SHOT_COMPILE_PARSED.get((network, precision))
-    if parsed is not None:
-        cmd.extend(["--parsed", str(parsed)])
     if precision == "int16_widened":
         cmd.append("--allow-widened-int16")
     _run_checked(cmd)
@@ -292,43 +288,26 @@ def run_one_shot_fpga(
     out_root: Path,
     *,
     build_dir: Path,
-    conf: float,
-    iou: float,
-    poll_timeout_s: float,
-    read_chunk_bytes: int,
-    compare_atol: float | None,
-    quiet_xdma: bool,
-    soft_reset: bool,
-    recompile: bool,
-    yolo_parsed_dir: Path | None = None,
-    resnet_parsed_dir: Path | None = None,
-    yolo_expect_detections: int | None = 1,
-    resnet_expect_top1: int | None = 1,
-    result_group: str | None = None,
-    golden_cache_dir: Path | None = None,
+    parsed_dir: Path,
+    result_group: str,
     session=None,
-    golden_mode: str = "auto",
-    announce_compare: bool = False,
-    verbose: bool = True,
 ) -> Path:
     """Run a full one-shot FPGA workload, compare features, and run the host boundary."""
     tag = _one_shot_tag(network, precision)
     net_dir = "yolo" if network == "yolo" else "resnet"
-    output_group = result_group or net_dir
+    batch = session is not None
+    yolo_parsed_dir = parsed_dir if network == "yolo" else None
+    resnet_parsed_dir = parsed_dir if network == "resnet" else None
     label = f"{'YOLO' if network == 'yolo' else 'ResNet'} {tag.upper()}"
-    if compare_atol is None:
-        # Selected attempt1 board validation measured native COCO W16A16 PAN
-        # max_abs <= 0.00930. Other maintained paths pass the strict 1e-3 gate.
-        compare_atol = 1e-2 if network == "yolo" and precision == "int16" else 1e-3
-    out_dir = out_root / output_group / f"one_shot_{tag}"
+    # Selected attempt1 board validation measured native COCO W16A16 PAN
+    # max_abs <= 0.00930. Other maintained paths pass the strict 1e-3 gate.
+    compare_atol = 1e-2 if network == "yolo" and precision == "int16" else 1e-3
+    out_dir = out_root / result_group / f"one_shot_{tag}"
     feat_dir = out_dir / "features"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    if recompile or not (build_dir / "plan.json").exists():
-        reason = "requested" if recompile else f"missing {build_dir / 'plan.json'}"
-        print(f"  [compile] {reason}, compiling {label} full one-shot", flush=True)
-        parsed_dir = yolo_parsed_dir if network == "yolo" else resnet_parsed_dir
-        _compile_one_shot_artifact(network, precision, build_dir, parsed_dir)
+    if session is None:
+        _ensure_one_shot_artifact(network, precision, build_dir, parsed_dir)
 
     stem = img_path.stem
     file_prefix = f"{stem}_{net_dir}_{tag}_fpga_oneshot"
@@ -347,16 +326,14 @@ def run_one_shot_fpga(
     import one_shot_host_head
     compare_ok = True
     compare_exc: BaseException | None = None
-    with _muted_stdout(not verbose):
+    with _muted_stdout(not batch):
         hw_session = session
         close_session = False
         if hw_session is None:
             hw_session = hw_runner_win.HardwareSession(
                 build_dir,
-                quiet_xdma=quiet_xdma,
-                soft_reset=soft_reset,
-                poll_timeout_s=poll_timeout_s,
-                read_chunk_bytes=read_chunk_bytes,
+                poll_timeout_s=XDMA_POLL_TIMEOUT_S,
+                read_chunk_bytes=XDMA_READ_CHUNK_BYTES,
             )
             close_session = True
         try:
@@ -382,10 +359,10 @@ def run_one_shot_fpga(
                 output=primary,
                 output_dir=feat_dir if named_outputs else None,
                 atol=compare_atol,
-                yolo_parsed_dir=yolo_parsed_dir if network == "yolo" else None,
-                parsed_dir=resnet_parsed_dir if network == "resnet" else None,
-                golden_cache_dir=golden_cache_dir,
-                golden_mode=golden_mode,
+                yolo_parsed_dir=yolo_parsed_dir,
+                parsed_dir=resnet_parsed_dir,
+                golden_cache_dir=OUT_DIR / "golden_cache",
+                golden_mode="compute",
             )
         except RuntimeError as exc:
             compare_ok = False
@@ -398,10 +375,8 @@ def run_one_shot_fpga(
             output=primary,
             output_dir=feat_dir if network == "yolo" else None,
             json_out=head_json,
-            conf=conf,
-            iou=iou,
-            expect_detections=yolo_expect_detections if network == "yolo" else None,
-            expect_top1=resnet_expect_top1 if network == "resnet" else None,
+            conf=0.15,
+            expect_top1=1 if network == "resnet" and not batch else None,
             yolo_parsed_dir=yolo_parsed_dir if network == "yolo" else None,
             parsed_dir=resnet_parsed_dir if network == "resnet" else None,
         )
@@ -413,11 +388,11 @@ def run_one_shot_fpga(
     else:
         _draw_resnet_classification(img_path, list(result.get("topk", [])), result_img)
 
-    if announce_compare:
+    if not batch:
         _print_compact_predictions(network, result)
         _print_result_banner(compare_ok)
 
-    if verbose:
+    if batch:
         timing = json.loads(timing_json.read_text())
         summary = f"{len(detections)} det" if network == "yolo" else result["topk"][0]["class_name"]
         print(f"  [fpga   ] {label} one-shot: {summary}")
@@ -471,8 +446,7 @@ def _sha256_file(path: Path) -> str:
 
 def _verify_release_bundle(*, require_xdma: bool, quiet: bool = False) -> dict:
     """Fail early if a fresh clone is missing any maintained runtime asset."""
-    bitstream = _verify_release_bitstream(quiet=quiet)
-    checked_hashes = 1
+    checked_hashes = 0
 
     model_manifest = json.loads(MODEL_INPUTS_MANIFEST.read_text(encoding="utf-8"))
     for entry in model_manifest["files"]:
@@ -513,7 +487,6 @@ def _verify_release_bundle(*, require_xdma: bool, quiet: bool = False) -> dict:
     result = {
         "status": "PASS",
         "release": "top",
-        "bitstream": bitstream["file"],
         "hashed_files": checked_hashes,
         "model_inputs": len(model_manifest["files"]),
         "compile_on_demand_workloads": 4,
@@ -531,51 +504,14 @@ def _verify_release_bundle(*, require_xdma: bool, quiet: bool = False) -> dict:
         )
     return result
 
-def _verify_release_bitstream(*, quiet: bool = False) -> dict:
-    bit_path = BITSTREAM_PATH
-    if not bit_path.is_file():
-        raise FileNotFoundError(f"top.bit not found: {bit_path}")
-    digest = hashlib.sha256()
-    with bit_path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(4 * 1024 * 1024), b""):
-            digest.update(chunk)
-    actual = digest.hexdigest()
-    result = {
-        "file": str(bit_path),
-        "expected_sha256": BITSTREAM_SHA256,
-        "actual_sha256": actual,
-        "bytes": bit_path.stat().st_size,
-        "status": "PASS" if actual == BITSTREAM_SHA256 and bit_path.stat().st_size == BITSTREAM_BYTES else "FAIL",
-    }
-    if result["status"] != "PASS":
-        raise RuntimeError(f"release bitstream integrity check failed: {bit_path}")
-    if not quiet:
-        print(f"Release bitstream PASS: {bit_path.name} sha256={actual[:16]}...")
-    return result
 
-
-def run_acceptance_suite(args: argparse.Namespace, networks: list[str],
+def run_acceptance_suite(limit: int, networks: list[str],
                          yolo_precisions: list[str], resnet_precisions: list[str]) -> int:
     """Run selected INT8/INT16 network acceptance workloads."""
-    if "resnet" in networks and "int16" in resnet_precisions:
-        native_parsed = (
-            Path(args.one_shot_resnet_parsed_dir)
-            if args.one_shot_resnet_parsed_dir
-            else ONE_SHOT_COMPILE_PARSED[("resnet", "int16")]
-        )
-        if not (native_parsed / "network.json").is_file():
-            print(
-                "  [ERROR] ResNet INT16 parsed model not found: "
-                f"{native_parsed}. Use project/compiler/frontend/parse_resnet18_qdq.py "
-                "--mode int16, or pass --one-shot-resnet-parsed-dir."
-            )
-            return 1
-    limit = int(args.num)
-    out_root = Path(args.out_dir) if args.out_dir else OUT_DIR
+    out_root = OUT_DIR
     report_dir = out_root / "acceptance"
     report_dir.mkdir(parents=True, exist_ok=True)
     cases: list[dict] = []
-    bitstream_check = _verify_release_bitstream()
 
     if "yolo" in networks:
         _, coco_images = _load_examples(COCO_MANIFEST, limit)
@@ -585,17 +521,13 @@ def run_acceptance_suite(args: argparse.Namespace, networks: list[str],
             tag = _one_shot_tag("yolo", precision)
             build_dir = Path(yolo_profile["builds"][precision])
             parsed_dir = Path(yolo_profile["parsed"][precision])
-            if not (build_dir / "plan.json").exists():
-                print(f"  [compile] missing {build_dir / 'plan.json'}, compiling YOLO {tag.upper()}", flush=True)
-                _compile_one_shot_artifact("yolo", precision, build_dir, parsed_dir)
+            _ensure_one_shot_artifact("yolo", precision, build_dir, parsed_dir)
             result_dir = out_root / "acceptance" / "yolo_coco" / f"one_shot_{tag}"
             _clear_result_jpgs(result_dir)
             session = hw_runner_win.HardwareSession(
                 build_dir,
-                quiet_xdma=not args.verbose_xdma,
-                soft_reset=not args.one_shot_no_soft_reset,
-                poll_timeout_s=args.one_shot_poll_timeout_s,
-                read_chunk_bytes=args.one_shot_read_chunk_bytes,
+                poll_timeout_s=XDMA_POLL_TIMEOUT_S,
+                read_chunk_bytes=XDMA_READ_CHUNK_BYTES,
             )
             try:
                 for item in coco_images:
@@ -611,19 +543,8 @@ def run_acceptance_suite(args: argparse.Namespace, networks: list[str],
                         run_one_shot_fpga(
                             "yolo", precision, image, out_root,
                             build_dir=build_dir,
-                            conf=args.conf,
-                            iou=args.iou,
-                            poll_timeout_s=args.one_shot_poll_timeout_s,
-                            read_chunk_bytes=args.one_shot_read_chunk_bytes,
-                            compare_atol=args.one_shot_compare_atol,
-                            quiet_xdma=not args.verbose_xdma,
-                            soft_reset=False,
-                            recompile=False,
-                            yolo_parsed_dir=parsed_dir,
-                            yolo_expect_detections=None,
+                            parsed_dir=parsed_dir,
                             result_group="acceptance/yolo_coco",
-                            golden_cache_dir=_golden_cache_dir(args),
-                            golden_mode=_golden_mode(args, single_shot=False),
                             session=session,
                         )
                         base = out_root / "acceptance" / "yolo_coco" / f"one_shot_{tag}"
@@ -646,23 +567,15 @@ def run_acceptance_suite(args: argparse.Namespace, networks: list[str],
         import hw_runner_win
         for precision in resnet_precisions:
             tag = _one_shot_tag("resnet", precision)
-            parsed_override = (
-                Path(args.one_shot_resnet_parsed_dir)
-                if args.one_shot_resnet_parsed_dir and precision == "int16"
-                else ONE_SHOT_COMPILE_PARSED[("resnet", precision)]
-            )
+            parsed_dir = ONE_SHOT_COMPILE_PARSED[("resnet", precision)]
             build_dir = ONE_SHOT_DEFAULT_BUILDS[("resnet", precision)]
-            if not (build_dir / "plan.json").exists():
-                print(f"  [compile] missing {build_dir / 'plan.json'}, compiling ResNet {tag.upper()}", flush=True)
-                _compile_one_shot_artifact("resnet", precision, build_dir, parsed_override)
+            _ensure_one_shot_artifact("resnet", precision, build_dir, parsed_dir)
             result_dir = out_root / "acceptance" / "resnet" / f"one_shot_{tag}"
             _clear_result_jpgs(result_dir)
             session = hw_runner_win.HardwareSession(
                 build_dir,
-                quiet_xdma=not args.verbose_xdma,
-                soft_reset=not args.one_shot_no_soft_reset,
-                poll_timeout_s=args.one_shot_poll_timeout_s,
-                read_chunk_bytes=args.one_shot_read_chunk_bytes,
+                poll_timeout_s=XDMA_POLL_TIMEOUT_S,
+                read_chunk_bytes=XDMA_READ_CHUNK_BYTES,
             )
             try:
                 for item in imagenet_images:
@@ -680,19 +593,8 @@ def run_acceptance_suite(args: argparse.Namespace, networks: list[str],
                         run_one_shot_fpga(
                             "resnet", precision, image, out_root,
                             build_dir=build_dir,
-                            conf=args.conf,
-                            iou=args.iou,
-                            poll_timeout_s=args.one_shot_poll_timeout_s,
-                            read_chunk_bytes=args.one_shot_read_chunk_bytes,
-                            compare_atol=args.one_shot_compare_atol,
-                            quiet_xdma=not args.verbose_xdma,
-                            soft_reset=False,
-                            recompile=False,
-                            resnet_parsed_dir=parsed_override,
-                            resnet_expect_top1=None,
+                            parsed_dir=parsed_dir,
                             result_group="acceptance/resnet",
-                            golden_cache_dir=_golden_cache_dir(args),
-                            golden_mode=_golden_mode(args, single_shot=False),
                             session=session,
                         )
                         base = out_root / "acceptance" / "resnet" / f"one_shot_{tag}"
@@ -723,7 +625,6 @@ def run_acceptance_suite(args: argparse.Namespace, networks: list[str],
             "resnet_int8": "INT8 W8A8",
             "resnet_int16": "INT16 W16A16 with signed INT64 accumulators",
         },
-        "bitstream_integrity": bitstream_check,
         "examples_per_dataset": limit,
         "case_count": len(cases),
         "passed": len(cases) - failed,
@@ -758,194 +659,68 @@ def run_acceptance_suite(args: argparse.Namespace, networks: list[str],
 def parse_args() -> argparse.Namespace:
     ap = argparse.ArgumentParser(
         description="YOLOv5n / ResNet18 FPGA E2E inference",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=__doc__.split("Usage\n-----\n")[1] if "Usage" in __doc__ else "",
+        allow_abbrev=False,
     )
-    ap.add_argument("--network", choices=["yolo", "resnet", "all"], default="all",
-                    help="yolo / resnet / all（默认 all）")
-    ap.add_argument("--precision", choices=["int8", "int16", "both"], default=None,
-                    help="int8 / int16 / both；同时作用于所选网络（默认 both）")
-    ap.add_argument("--num", type=int, default=None, metavar="N",
-                    help="每组图片数，1–20。单图默认 1；大于 1 时写验收报告")
-    ap.add_argument("--self-check", action="store_true",
-                    help="不访问 FPGA，校验随附文件及 SHA256")
-    ap.add_argument("--yolo-img", default=None,
-                    help="覆盖单图 YOLO 测试图")
-    ap.add_argument("--resnet-img", default=str(DEFAULT_RESNET_IMG),
-                    help="覆盖单图 ResNet 测试图")
-    ap.add_argument("--conf", type=float, default=0.15,
-                    help="YOLO 主机端 NMS 置信度阈值")
-    ap.add_argument("--iou", type=float, default=0.45,
-                    help="YOLO 主机端 NMS IoU 阈值")
-    ap.add_argument("--out-dir", default=None,
-                    help="输出根目录；单图默认 test/network/output/inference")
-    ap.add_argument("--golden", action="store_true",
-                    help="FPGA 跑完后在主机计算 compiler golden 再比对；默认只用 golden cache")
-    ap.add_argument("--verbose", action="store_true",
-                    help="打印 [win]/golden/路径等细节；默认 --num 1 只输出检测与 result: same")
-    ap.add_argument("--yolo-precision", choices=["int8", "int16", "both"], default=None,
-                    help=argparse.SUPPRESS)
-    ap.add_argument("--resnet-precision",
-                    choices=["vai", "int8", "int16", "int16_widened", "both"], default=None,
-                    help=argparse.SUPPRESS)
-    ap.add_argument("--one-shot-build-dir", default=None, help=argparse.SUPPRESS)
-    ap.add_argument("--one-shot-poll-timeout-s", type=float, default=240.0, help=argparse.SUPPRESS)
-    ap.add_argument("--one-shot-read-chunk-bytes", type=int, default=65536, help=argparse.SUPPRESS)
-    ap.add_argument("--one-shot-compare-atol", type=float, default=None, help=argparse.SUPPRESS)
-    ap.add_argument("--no-golden-cache", action="store_true", help=argparse.SUPPRESS)
-    ap.add_argument("--one-shot-no-soft-reset", action="store_true", help=argparse.SUPPRESS)
-    ap.add_argument("--one-shot-recompile", action="store_true", help=argparse.SUPPRESS)
-    ap.add_argument("--one-shot-yolo-parsed-dir", default=None, help=argparse.SUPPRESS)
-    ap.add_argument("--one-shot-resnet-parsed-dir", default=None, help=argparse.SUPPRESS)
-    ap.add_argument("--one-shot-yolo-expect-detections", type=int, default=None, help=argparse.SUPPRESS)
-    ap.add_argument("--verbose-xdma", action="store_true", help=argparse.SUPPRESS)
-    ap.add_argument("--acceptance", action="store_true", help=argparse.SUPPRESS)
-    ap.add_argument("--acceptance-examples", type=int, default=None, help=argparse.SUPPRESS)
-    return ap.parse_args()
+    ap.add_argument("--model", choices=["yolo", "resnet", "all"], default="all",
+                    help="选择模型（默认 all）")
+    ap.add_argument("--precision", choices=["int8", "int16", "both"], default="both",
+                    help="选择精度（默认 both）")
+    ap.add_argument("--num", type=int, default=1, metavar="N",
+                    help="每组图片数（1–20，默认 1），大于 1 时生成验收报告")
+    args = ap.parse_args()
+    if not 1 <= args.num <= 20:
+        ap.error("--num must be an integer from 1 to 20")
+    return args
 
 
 def main() -> int:
     args = parse_args()
-    verbose = bool(args.verbose)
-    if args.self_check:
-        try:
-            result = _verify_release_bundle(require_xdma=(os.name == "nt"))
-        except (OSError, ValueError, KeyError, RuntimeError) as exc:
-            print(f"  [ERROR] release self-check failed: {exc}")
-            return 1
-        print(json.dumps(result, indent=2, ensure_ascii=False))
-        return 0
-
-    networks = ["yolo", "resnet"] if args.network == "all" else [args.network]
-    shared = _normalize_cli_precision(args.precision)
-    yolo_raw = shared if shared is not None else _normalize_cli_precision(args.yolo_precision)
-    resnet_raw = shared if shared is not None else _normalize_cli_precision(args.resnet_precision)
-    yolo_precisions = _expand_precisions(yolo_raw or "both", "yolo")
-    resnet_precisions = _expand_precisions(resnet_raw or "both", "resnet")
-
-    if args.num is None:
-        args.num = args.acceptance_examples
-    if args.num is None:
-        args.num = 20 if args.acceptance else 1
-    if not 1 <= int(args.num) <= 20:
-        print("  [ERROR] --num must be an integer from 1 to 20")
-        return 1
-    args.num = int(args.num)
-    if args.num > 1:
-        args.acceptance = True
-    compact = (not args.acceptance) and (not verbose)
+    networks = ["yolo", "resnet"] if args.model == "all" else [args.model]
+    yolo_precisions = _expand_precisions(args.precision, "yolo")
+    resnet_precisions = _expand_precisions(args.precision, "resnet")
 
     try:
-        _verify_release_bundle(require_xdma=(os.name == "nt"), quiet=compact)
+        _verify_release_bundle(require_xdma=(os.name == "nt"), quiet=args.num == 1)
     except (OSError, ValueError, KeyError, RuntimeError) as exc:
         print(f"  [ERROR] release preflight failed: {exc}")
         return 1
     _setup_imports()
 
-    if args.acceptance:
-        return run_acceptance_suite(args, networks, yolo_precisions, resnet_precisions)
+    if args.num > 1:
+        return run_acceptance_suite(args.num, networks, yolo_precisions, resnet_precisions)
 
     yolo_profile = YOLO_ONE_SHOT_PROFILES["coco"]
-    yolo_img = Path(args.yolo_img) if args.yolo_img else Path(yolo_profile["image"])
-    resnet_img = Path(args.resnet_img)
-    workloads: list[tuple[str, str, Path]] = []
-    if "yolo" in networks:
-        if not yolo_img.exists():
-            print(f"  [ERROR] image not found: {yolo_img}")
-            return 1
-        workloads.extend(("yolo", p, yolo_img) for p in yolo_precisions)
-    if "resnet" in networks:
-        if not resnet_img.exists():
-            print(f"  [ERROR] image not found: {resnet_img}")
-            return 1
-        workloads.extend(("resnet", p, resnet_img) for p in resnet_precisions)
-    if args.one_shot_build_dir and len(workloads) != 1:
-        print("  [ERROR] --one-shot-build-dir can only be used with a single selected workload")
-        return 1
-    yolo_parsed_override = Path(args.one_shot_yolo_parsed_dir) if args.one_shot_yolo_parsed_dir else None
-    resnet_parsed_override = Path(args.one_shot_resnet_parsed_dir) if args.one_shot_resnet_parsed_dir else None
-    if any(n == "resnet" and p == "int16" for n, p, _ in workloads):
-        native_parsed = resnet_parsed_override or ONE_SHOT_COMPILE_PARSED[("resnet", "int16")]
-        if not (native_parsed / "network.json").is_file():
-            print(
-                "  [ERROR] ResNet INT16 parsed model not found: "
-                f"{native_parsed}. Use parse_resnet18_qdq.py --mode int16 "
-                "or --one-shot-resnet-parsed-dir."
-            )
+    for network in networks:
+        image = yolo_profile["image"] if network == "yolo" else DEFAULT_RESNET_IMG
+        if not image.is_file():
+            print(f"  [ERROR] image not found: {image}")
             return 1
 
-    one_shot_out_root = Path(args.out_dir) if args.out_dir else INFERENCE_OUT_DIR
-    if verbose:
-        print("=" * 60)
-        print("EdgeYOLO-FPGA Full One-Shot Inference")
-        print(f"  Workloads     : {', '.join(f'{n}:{_one_shot_tag(n, p)}' for n, p, _ in workloads)}")
-        print(f"  Output        : {one_shot_out_root.resolve()}")
-        print("=" * 60)
-    t0 = time.time()
-    total_timing = 0.0
-    for network, precision, image in workloads:
-        if network == "yolo":
-            default_build = Path(yolo_profile["builds"][precision])
-            yolo_parsed_dir = yolo_parsed_override or Path(yolo_profile["parsed"][precision])
-            profile_expect = int(yolo_profile["expect_detections"])
-            requested_expect = args.one_shot_yolo_expect_detections
-            yolo_expect = profile_expect if requested_expect is None else requested_expect
-            yolo_expect = None if yolo_expect < 0 else yolo_expect
-            result_group = str(yolo_profile["output_group"])
-            resnet_parsed_dir = None
-        else:
-            default_build = ONE_SHOT_DEFAULT_BUILDS[(network, precision)]
-            yolo_parsed_dir = None
-            resnet_parsed_dir = (
-                resnet_parsed_override
-                if resnet_parsed_override is not None and precision == "int16"
-                else ONE_SHOT_COMPILE_PARSED[(network, precision)]
-            )
-            yolo_expect = None
-            result_group = "resnet"
-        tag = _one_shot_tag(network, precision)
-        build_dir = Path(args.one_shot_build_dir) if args.one_shot_build_dir else default_build
-        if verbose:
-            print(f"\n--- {network.upper()} {tag.upper()} One-Shot [{image.name}] ---")
-        _clear_result_jpgs(
-            one_shot_out_root / result_group / f"one_shot_{tag}",
-            quiet=compact,
-        )
-        try:
-            run_one_shot_fpga(
-                network, precision, image, one_shot_out_root,
-                build_dir=build_dir,
-                conf=args.conf,
-                iou=args.iou,
-                poll_timeout_s=args.one_shot_poll_timeout_s,
-                read_chunk_bytes=args.one_shot_read_chunk_bytes,
-                compare_atol=args.one_shot_compare_atol,
-                quiet_xdma=not (verbose or args.verbose_xdma),
-                soft_reset=not args.one_shot_no_soft_reset,
-                recompile=args.one_shot_recompile,
-                yolo_parsed_dir=yolo_parsed_dir if network == "yolo" else None,
-                resnet_parsed_dir=resnet_parsed_dir if network == "resnet" else None,
-                yolo_expect_detections=yolo_expect if network == "yolo" else None,
-                result_group=result_group,
-                golden_cache_dir=_golden_cache_dir(args),
-                golden_mode=_golden_mode(args, single_shot=True),
-                announce_compare=True,
-                verbose=verbose,
-            )
-        except RuntimeError as exc:
-            if compact:
+        precisions = yolo_precisions if network == "yolo" else resnet_precisions
+        for precision in precisions:
+            if network == "yolo":
+                build_dir = yolo_profile["builds"][precision]
+                parsed_dir = yolo_profile["parsed"][precision]
+                result_group = yolo_profile["output_group"]
+            else:
+                build_dir = ONE_SHOT_DEFAULT_BUILDS[(network, precision)]
+                parsed_dir = ONE_SHOT_COMPILE_PARSED[(network, precision)]
+                result_group = "resnet"
+            tag = _one_shot_tag(network, precision)
+            _clear_result_jpgs(INFERENCE_OUT_DIR / result_group / f"one_shot_{tag}", quiet=True)
+            try:
+                run_one_shot_fpga(
+                    network, precision, image, INFERENCE_OUT_DIR,
+                    build_dir=build_dir,
+                    parsed_dir=parsed_dir,
+                    result_group=result_group,
+                )
+            except RuntimeError as exc:
                 if "exceeded atol" not in str(exc):
                     print(f"  [ERROR] {exc}")
                 return 1
-            raise
-        timing_path = one_shot_out_root / result_group / f"one_shot_{tag}" / f"{image.stem}_{network}_{tag}_fpga_oneshot_timing.json"
-        if timing_path.exists():
-            total_timing += float(json.loads(timing_path.read_text()).get("total_s", 0.0))
-    if verbose:
-        print(f"\nDone in {time.time() - t0:.1f}s")
-        if total_timing:
-            print(f"FPGA runner total across workloads: {total_timing:.3f}s")
     return 0
+
 
 if __name__ == "__main__":
     raise SystemExit(main())

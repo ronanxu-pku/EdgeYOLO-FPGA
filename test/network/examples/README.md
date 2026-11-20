@@ -5,4 +5,4 @@
 
 These samples are a compact functional test set. They validate FPGA/compiler agreement and
 exercise the host heads; they are not large enough to claim COCO mAP or ImageNet Top-1 accuracy.
-`python test/network/run.py --network all --precision both --num 20` runs every selected image in INT8 and INT16.
+`python test/network/run.py --model all --precision both --num 20` runs every selected image in INT8 and INT16.

@@ -14,13 +14,12 @@ Precision 和 TOPS 请配对加载 [top.bit](bitstream/top.bit) 和 [top.ltx](bi
 
 测试命令、产物目录、判定标准和本次实测见 [`test/TESTING.md`](test/TESTING.md)。每组测试的产物写在自己的 `output/` 里。
 
-执行网络自检前，先[恢复峰值版烧录文件](test/TESTING.md#恢复峰值版烧录文件)。
+复现实测时，在板卡上加载[网络测试用烧录文件](test/TESTING.md#恢复峰值版烧录文件)。
 
 Python 依赖：
 
 ```powershell
 python -m pip install -r requirements-fpga-runtime.txt
-python test/network/run.py --self-check
 ```
 
 综合入口在 `project/`：
