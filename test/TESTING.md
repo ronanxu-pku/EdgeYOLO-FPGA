@@ -110,14 +110,15 @@ python test/precision/run.py
 
 ## 峰值 TOPS
 
-烧录 `bitstream/top.bit` 并配对加载 `bitstream/top.ltx`，在仓库根目录运行：
+烧录 `bitstream/top_tops_boardref.bit` 并加载 `bitstream/top_tops_boardref.ltx`。
+确认 XDMA 正常并关闭占用 JTAG 的在线会话后，在仓库根目录运行：
 
 ```powershell
-python test/tops/fpga/run.py
+python test/tops/run.py
 ```
 
 脚本自动 arm ILA、通过 XDMA 发任务并校验回读，再打开 Vivado Lab 原生波形。
-采样范围、报告和判定条件见 [峰值测试说明](tops/fpga/README.md)。
+采样范围、报告和判定条件见 [峰值测试说明](tops/README.md)。
 
 旧版峰值测试的主机回读记录为 2048/2048 个 128-bit 字匹配。该轮未采 ILA。
 

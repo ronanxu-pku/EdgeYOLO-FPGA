@@ -15,13 +15,15 @@ import xml.etree.ElementTree as ET
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from zipfile import BadZipFile
+from zipfile import BadZipFile, ZipFile
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from ila_runtime import capture_env, find_vivado, open_native_waveforms, resolve_ltx, run_vivado
 
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
+REPO_ROOT = Path(__file__).resolve().parents[2]
+FPGA_DIR = Path(__file__).resolve().parent / "fpga"
+DEFAULT_LTX = REPO_ROOT / "bitstream" / "top_tops_boardref.ltx"
 GENERATOR = REPO_ROOT / "project" / "rtl" / "tb" / "lite_bd" / "module_tb" / "golden_module_tb.py"
 UNIT_TB_DIR = REPO_ROOT / "test" / "network" / "host"
 DEFAULT_RUN_DIR = REPO_ROOT / "test" / "tops" / "output" / "fpga_peak_int8"
@@ -49,6 +51,7 @@ REQUIRED_CASE_FILES = (
     "weight_tile0.hex",
     "weight_tile7.hex",
     "manifest.txt",
+    "operands.npz",
 )
 
 
@@ -206,7 +209,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--timeout-s", type=float, default=60.0)
     parser.add_argument("--quiet-xdma", action="store_true")
-    parser.add_argument("--ltx", type=Path, help="Probe file matching the programmed FPGA")
+    parser.add_argument("--ltx", type=Path, help="Matching probe file (default: top_tops_boardref.ltx)")
     parser.add_argument("--vivado", help="Path to vivado_lab.bat or vivado.bat")
     parser.add_argument("--hw-server", default="localhost:3121")
     parser.add_argument("--hw-target", default="*")
@@ -344,18 +347,34 @@ class PowerSampler:
 
 
 def open_peak_waveform(vivado: str, path: Path) -> int:
-    from verify_peak import PROBES
+    from fpga.verify_peak import BOARDREF_PROBES, PROBES
 
     if path.is_dir():
         path = path / "peak_int8.ila"
-    return open_native_waveforms(vivado, {"peak_int8": path}, tuple(PROBES), last_sample=185)
+    with ZipFile(path) as archive:
+        configs = [name for name in archive.namelist() if name.lower().endswith(".wcfg")]
+        if len(configs) != 1:
+            raise ValueError(f"Expected one native wave configuration in {path}")
+        config = archive.read(configs[0])
+    probes = tuple(PROBES)
+    if b"peak_compute_mask" in config:
+        prefix = "dcim_array_0_" if b"dcim_array_0_peak_compute_mask" in config else ""
+        probes = tuple(prefix + name for name in BOARDREF_PROBES)
+    last_sample = 185
+    report_path = path.with_name("fpga_peak_report.json")
+    if report_path.is_file():
+        report = load_previous_report(report_path)
+        last_write = report.get("ila_capture", {}).get("last_write_sample")
+        if isinstance(last_write, int):
+            last_sample = min(1023, max(last_sample, last_write + 4))
+    return open_native_waveforms(vivado, {"peak_int8": path}, probes, last_sample=last_sample)
 
 
 def capture_peak(args: argparse.Namespace) -> int:
-    from verify_peak import verify_peak
+    from fpga.verify_peak import verify_peak
 
     vivado = find_vivado(args.vivado)
-    ltx = resolve_ltx(REPO_ROOT, args.ltx)
+    ltx = resolve_ltx(REPO_ROOT, args.ltx or DEFAULT_LTX)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     run_dir = (args.run_dir or DEFAULT_RUN_DIR / stamp).resolve()
     if run_dir.exists():
@@ -363,36 +382,40 @@ def capture_peak(args: argparse.Namespace) -> int:
     env = capture_env(sys.executable, ltx, args.hw_server, args.hw_target)
     env.update(DCIM_TOPS_TIMEOUT=str(args.timeout_s), DCIM_TOPS_QUIET=str(int(args.quiet_xdma)),
                DCIM_TOPS_STAGING=args.staging)
-    script = Path(__file__).with_name("capture.tcl")
+    script = FPGA_DIR / "capture.tcl"
     print("Arming TOPS ILA and running the 64-job INT8 workload...", flush=True)
     with tempfile.TemporaryDirectory(prefix="dcim_tops_capture_", ignore_cleanup_errors=True) as scratch:
         work = Path(scratch) / "run"
         env["DCIM_TOPS_CAPTURE_ROOT"] = str(work)
         batch = run_vivado(vivado, script, Path(tempfile.gettempdir()), env, "batch")
-        if batch.returncode:
-            print("\n".join(batch.stdout.splitlines()[-24:]), file=sys.stderr)
-            return batch.returncode
-
-        archive = work / "peak_int8.ila"
-        if not archive.is_file() or not archive.stat().st_size:
-            raise ValueError("Vivado did not save a native TOPS ILA capture")
-        report = load_previous_report(work / "fpga_peak_report.json")
         run_dir.mkdir(parents=True, exist_ok=False)
-        capture = run_dir / archive.name
-        shutil.copyfile(archive, capture)
+        (run_dir / "vivado.log").write_text(batch.stdout, encoding="utf-8")
+        for name in ("peak_int8.ila", "peak_int8.csv", "fpga_peak_report.json"):
+            path = work / name
+            if path.is_file():
+                shutil.copyfile(path, run_dir / name)
+        capture = run_dir / "peak_int8.ila"
+        if not capture.is_file() or not capture.stat().st_size:
+            raise ValueError(f"Vivado did not save a TOPS ILA capture. See {run_dir / 'vivado.log'}")
+        report = load_previous_report(run_dir / "fpga_peak_report.json")
         try:
             evidence = verify_peak(work, report)
         except (OSError, ValueError) as error:
+            report.update(run_dir=str(run_dir), status="FAIL_EVIDENCE", capture_error=str(error))
+            (run_dir / "fpga_peak_report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
             raise ValueError(f"{error}. View the captured samples with --view-only \"{capture}\"") from error
+        if batch.returncode:
+            raise ValueError(f"Vivado capture did not complete successfully. See {run_dir / 'vivado.log'}")
         cycles = evidence["issue_cycles"]
         tops = calculate_tops(cycles, args.frequency_mhz, OPERATIONS_PER_ROUND)
         report.update(
             run_dir=str(run_dir), status="PASS" if tops >= TOPS_REQUIREMENT else "FAIL_TOPS",
             frequency_mhz=args.frequency_mhz, ila_active_cycles=cycles, calculated_peak_tops=tops,
             meets_2tops=tops >= TOPS_REQUIREMENT, ila_capture=evidence,
+            probes_file=str(ltx),
             ila_cycle_qualification="elapsed from first issue through last issue, inclusive",
         )
-        report.pop("expected_ila")
+        report.pop("expected_ila", None)
         (run_dir / "fpga_peak_report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
 
     print(f"{report['status']} INT8: {evidence['host_words_matched']} words match, "
@@ -461,7 +484,7 @@ def main() -> int:
         sampler = None
         power_report = None
         if args.measure_power:
-            sys.path.insert(0, str(Path(__file__).resolve().parent / "tools"))
+            sys.path.insert(0, str(FPGA_DIR / "tools"))
             sampler = PowerSampler(
                 args.power_port,
                 _power_rail_names(args.power_rails),

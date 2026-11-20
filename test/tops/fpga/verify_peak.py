@@ -17,26 +17,37 @@ STAGES = (
     ("ma_accept_mask", "ma_ch0_col_sums"),
     ("write_done_mask", "write_job", "write_ch0"),
 )
-FULL_MASK = 0xff
+BOARDREF_PROBES = {
+    "peak_compute_mask": 8, "peak_job": 6, "peak_phase": 2, "peak_dcim_input": 32,
+    "peak_result_valid": 1, "peak_result_data": 32,
+}
+BOARDREF_STAGES = (
+    ("peak_compute_mask", "peak_job", "peak_phase", "peak_dcim_input"),
+    ("peak_result_valid", "peak_result_data"),
+)
 JOB_COUNT = 64
 PHASE_COUNT = 2 * JOB_COUNT
 RESULT_WORDS = JOB_COUNT * 8 * 4
 
 
 def read_events(path: Path):
-    events = [[] for _ in STAGES]
     with path.open(newline="", encoding="utf-8-sig") as stream:
         rows = csv.reader(stream)
         for header in rows:
-            names = [field.strip().rsplit("/", 1)[-1].split("[", 1)[0] for field in header]
-            if "issue_mask" in names:
+            names = [field.strip().rsplit("/", 1)[-1].split("[", 1)[0].removeprefix("dcim_array_0_")
+                     for field in header]
+            if "issue_mask" in names or "peak_compute_mask" in names:
                 break
         else:
             raise ValueError("TOPS probe names are missing from the Vivado CSV")
-        for name in PROBES:
+        boardref = "peak_compute_mask" in names
+        probes, stages = (BOARDREF_PROBES, BOARDREF_STAGES) if boardref else (PROBES, STAGES)
+        events = [[] for _ in stages]
+        for name in probes:
             if names.count(name) != 1:
                 raise ValueError(f"Expected exactly one CSV column for {name}")
-        indexes = {name: names.index(name) for name in PROBES}
+        indexes = {name: names.index(name) for name in probes}
+        sample_index = next((i for i, name in enumerate(names) if name.lower() == "sample in buffer"), None)
         radices = ["HEX"] * len(header)
         sample = 0
         for row in rows:
@@ -47,30 +58,73 @@ def read_events(path: Path):
                 continue
             if len(row) < len(header):
                 raise ValueError(f"Incomplete Vivado CSV row at sample {sample}")
+            if sample_index is not None and int(row[sample_index]) != sample:
+                raise ValueError(f"Missing or reordered Vivado CSV sample {sample}")
 
             def bus(name):
                 i = indexes[name]
-                return parse_bus(row[i], radices[i], PROBES[name])
+                return parse_bus(row[i], radices[i], probes[name])
 
-            for records, (mask_name, *signals) in zip(events, STAGES, strict=True):
+            for records, (mask_name, *signals) in zip(events, stages, strict=True):
                 mask = bus(mask_name)
-                if mask == FULL_MASK:
+                if mask == (1 << probes[mask_name]) - 1:
                     records.append((sample, *(bus(signal) for signal in signals)))
                 elif mask:
                     raise ValueError(f"{mask_name}=0x{mask:02X} at sample {sample}, expected all 8 Tile bits")
             sample += 1
-    return events
+    return boardref, events
+
+
+def verify_boardref(issues, writes, folder: Path) -> dict:
+    if (len(issues), len(writes)) != (PHASE_COUNT, JOB_COUNT):
+        raise ValueError(f"Expected {PHASE_COUNT} issue cycles and {JOB_COUNT} Tile 0 first writes, "
+                         f"got {len(issues)} and {len(writes)}")
+    issue_start, write_start = issues[0][0], writes[0][0]
+    issue_end = issues[-1][0] + 1
+    if not issue_start + 1 < write_start < issue_end:
+        raise ValueError("Tile 0 writes did not overlap subsequent all-Tile input phases")
+
+    with np.load(folder / "operands.npz") as inputs:
+        activation = inputs["act"].astype(np.int32)
+        golden = inputs["golden"][:, 0].astype(np.int64)
+    for phase, record in enumerate(issues):
+        job, low = divmod(phase, 2)
+        nibbles = (activation[job, :8] >> (0 if low else 4)) & 15
+        packed = sum(int(nibble) << (4 * lane) for lane, nibble in enumerate(nibbles))
+        if record != (issue_start + phase, job, low, packed):
+            raise ValueError(f"Wrong issue cadence, job, phase or Tile 0 input at phase {phase}")
+    for job, (sample, result) in enumerate(writes):
+        if (sample, result) != (write_start + 2 * job, int(golden[job]) & 0xffffffff):
+            raise ValueError(f"Wrong Tile 0 first-write cadence or result at job {job}")
+        if sample <= issues[2 * job + 1][0]:
+            raise ValueError(f"Tile 0 job {job} wrote before both input phases")
+
+    return {
+        "probe_layout": "boardref",
+        "active_tile_mask": "0xFF",
+        "issue_sample_start": issue_start,
+        "issue_sample_end_exclusive": issue_end,
+        "issue_cycles": issue_end - issue_start,
+        "first_write_sample": write_start,
+        "last_write_sample": writes[-1][0],
+        "write_interval_cycles": 2,
+        "tile0_results_checked": len(writes),
+        "host_words_matched": RESULT_WORDS,
+    }
 
 
 def verify_peak(folder: Path, host_report: dict) -> dict:
-    checks = host_report["host_results"]
-    if (host_report["host_correctness_pass"] is not True or
+    checks = host_report.get("host_results", [])
+    if (host_report.get("host_correctness_pass") is not True or
             not checks or any(check["pass"] is not True or check["failed"] for check in checks) or
             sum(check["total_words"] for check in checks) != RESULT_WORDS or
             sum(check["passed"] for check in checks) != RESULT_WORDS):
         raise ValueError(f"Host readback must match all {RESULT_WORDS} result words")
 
-    issues, columns, writes = read_events(folder / "peak_int8.csv")
+    boardref, events = read_events(folder / "peak_int8.csv")
+    if boardref:
+        return verify_boardref(*events, folder)
+    issues, columns, writes = events
     counts = (len(issues), len(columns), len(writes))
     if counts != (PHASE_COUNT, PHASE_COUNT, JOB_COUNT):
         raise ValueError(f"Expected issue/MA/write counts {(PHASE_COUNT, PHASE_COUNT, JOB_COUNT)}, got {counts}")
@@ -99,6 +153,8 @@ def verify_peak(folder: Path, host_report: dict) -> dict:
             raise ValueError(f"Job {job} completed before its final MA phase")
 
     return {
+        "probe_layout": "pipeline",
+        "active_tile_mask": "0xFF",
         "issue_sample_start": issue_start,
         "issue_sample_end_exclusive": issue_end,
         "issue_cycles": issue_end - issue_start,

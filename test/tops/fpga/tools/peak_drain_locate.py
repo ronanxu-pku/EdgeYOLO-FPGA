@@ -207,7 +207,7 @@ def unique(tag: int, n: int) -> bytes:
 
 def main() -> int:
     if not (RUN_DIR / "expected.hex").is_file():
-        print(f"missing peak case at {RUN_DIR}; generate with test/tops/fpga/run.py first")
+        print(f"missing peak case at {RUN_DIR}; generate with test/tops/run.py first")
         return 2
     expected = hex_to_bin(RUN_DIR / "expected.hex")[: N_WORDS * 16]
     print(f"[loc] peak dir={RUN_DIR}")
