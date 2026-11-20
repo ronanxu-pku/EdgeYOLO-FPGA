@@ -110,6 +110,8 @@ logs/**
 !/bitstream/top_precision.ltx
 !/bitstream/top_tops_only.bit
 !/bitstream/top_tops_only.ltx
+!/bitstream/top_tops_boardref.bit
+!/bitstream/top_tops_boardref.ltx
 
 # Downloaded / extra model packages
 weihgts/
