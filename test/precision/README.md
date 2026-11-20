@@ -4,8 +4,8 @@
 
 ## 实机测试
 
-在接有 VCU128 JTAG 和 XDMA 的 Windows 主机运行。板卡烧录联合版 `bitstream/top.bit` 并使用同目录的 `top.ltx`。
-同一对文件也用于 TOPS。主机需装有 XDMA 驱动、Python 和 NumPy，以及 Vivado Lab 或 Vivado。
+在接有 VCU128 JTAG 和 XDMA 的 Windows 主机运行。板卡烧录 `bitstream/top_precision.bit` 并加载 `bitstream/top_precision.ltx`。
+主机需装有 XDMA 驱动、Python 和 NumPy，以及 Vivado Lab 或 Vivado。
 运行前关闭占用 JTAG 的在线 Hardware Manager 会话。
 
 从仓库根目录执行，默认依次测试 INT8 和 INT16。
@@ -22,7 +22,7 @@ python test/precision/run.py
 python test/precision/run.py --view-only <本次运行目录>
 ~~~
 
-只测一项或只看一项可加 `--case int8`、`--case int16` 或 `--case int16-high`。探针文件放在别处时可用 `--ltx <top.ltx路径>`。Vivado 在自定义路径时传 `--vivado <启动器路径>`。多个 JTAG 目标可用 `--hw-target <目标名称>` 指定。
+只测一项或只看一项可加 `--case int8`、`--case int16` 或 `--case int16-high`。探针文件放在别处时可用 `--ltx <top_precision.ltx 路径>`。Vivado 在自定义路径时传 `--vivado <启动器路径>`。多个 JTAG 目标可用 `--hw-target <目标名称>` 指定。
 
 ## 测例
 

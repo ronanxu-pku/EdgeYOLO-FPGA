@@ -4,7 +4,7 @@ source [file join $testDir .. .. ila_common.tcl]
 with_dcim_hw_device {
     set ila [get_hw_ilas -of_objects [current_hw_device] -filter {CELL_NAME =~ "*/peak_tops_ila"}]
     if {[llength $ila] != 1} {
-        error "Expected peak_tops_ila. Program top_tops_boardref.bit with its matching LTX."
+        error "Expected peak_tops_ila. Program top_network_tops.bit and load top_network_tops.ltx."
     }
     set mask [get_hw_probes -of_objects $ila -filter {NAME =~ "*issue_mask*"}]
     reset_hw_ila $ila

@@ -112,7 +112,7 @@ def run_vivado(vivado: str, script: Path, cwd: Path, env: dict, mode: str):
 
 
 def resolve_ltx(repo: Path, override: Path | None) -> Path:
-    ltx = override if override is not None else repo / "bitstream" / "top.ltx"
+    ltx = override if override is not None else repo / "bitstream" / "top_precision.ltx"
     if not ltx.is_file():
         raise FileNotFoundError(ltx)
     return ltx.resolve()

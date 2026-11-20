@@ -30,10 +30,26 @@
                                 "id": 0,
                                 "type": "DATA_TRIGGER",
                                 "direction": "IN",
+                                "isVector": false,
+                                "leftIndex": 0,
+                                "rightIndex": 0,
+                                "portIndex": 0,
+                                "nets": [
+                                    {
+                                        "name": "lite_i/dcim_array_0_peak_clk_toggle",
+                                        "isBus": false
+                                    }
+                                ]
+                            },
+                            {
+                                "name": "probe1",
+                                "id": 1,
+                                "type": "DATA_TRIGGER",
+                                "direction": "IN",
                                 "isVector": true,
                                 "leftIndex": 0,
                                 "rightIndex": 7,
-                                "portIndex": 0,
+                                "portIndex": 1,
                                 "nets": [
                                     {
                                         "name": "lite_i/dcim_array_0_peak_compute_mask",
@@ -68,14 +84,74 @@
                                 ]
                             },
                             {
-                                "name": "probe1",
-                                "id": 1,
+                                "name": "probe2",
+                                "id": 2,
+                                "type": "DATA_TRIGGER",
+                                "direction": "IN",
+                                "isVector": true,
+                                "leftIndex": 0,
+                                "rightIndex": 5,
+                                "portIndex": 2,
+                                "nets": [
+                                    {
+                                        "name": "lite_i/dcim_array_0_peak_job",
+                                        "isBus": true,
+                                        "subnets": [
+                                            {
+                                                "name": "lite_i/dcim_array_0_peak_job[5]"
+                                            },
+                                            {
+                                                "name": "lite_i/dcim_array_0_peak_job[4]"
+                                            },
+                                            {
+                                                "name": "lite_i/dcim_array_0_peak_job[3]"
+                                            },
+                                            {
+                                                "name": "lite_i/dcim_array_0_peak_job[2]"
+                                            },
+                                            {
+                                                "name": "lite_i/dcim_array_0_peak_job[1]"
+                                            },
+                                            {
+                                                "name": "lite_i/dcim_array_0_peak_job[0]"
+                                            }
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                "name": "probe3",
+                                "id": 3,
+                                "type": "DATA_TRIGGER",
+                                "direction": "IN",
+                                "isVector": true,
+                                "leftIndex": 0,
+                                "rightIndex": 1,
+                                "portIndex": 3,
+                                "nets": [
+                                    {
+                                        "name": "lite_i/dcim_array_0_peak_phase",
+                                        "isBus": true,
+                                        "subnets": [
+                                            {
+                                                "name": "lite_i/dcim_array_0_peak_phase[1]"
+                                            },
+                                            {
+                                                "name": "lite_i/dcim_array_0_peak_phase[0]"
+                                            }
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                "name": "probe4",
+                                "id": 4,
                                 "type": "DATA_TRIGGER",
                                 "direction": "IN",
                                 "isVector": true,
                                 "leftIndex": 0,
                                 "rightIndex": 31,
-                                "portIndex": 1,
+                                "portIndex": 4,
                                 "nets": [
                                     {
                                         "name": "lite_i/dcim_array_0_peak_dcim_input",
@@ -182,74 +258,68 @@
                                 ]
                             },
                             {
-                                "name": "probe2",
-                                "id": 2,
+                                "name": "probe5",
+                                "id": 5,
                                 "type": "DATA_TRIGGER",
                                 "direction": "IN",
                                 "isVector": true,
                                 "leftIndex": 0,
-                                "rightIndex": 5,
-                                "portIndex": 2,
+                                "rightIndex": 2,
+                                "portIndex": 5,
                                 "nets": [
                                     {
-                                        "name": "lite_i/dcim_array_0_peak_job",
+                                        "name": "lite_i/dcim_array_0_peak_pipeline_fire",
                                         "isBus": true,
                                         "subnets": [
                                             {
-                                                "name": "lite_i/dcim_array_0_peak_job[5]"
+                                                "name": "lite_i/dcim_array_0_peak_pipeline_fire[2]"
                                             },
                                             {
-                                                "name": "lite_i/dcim_array_0_peak_job[4]"
+                                                "name": "lite_i/dcim_array_0_peak_pipeline_fire[1]"
                                             },
                                             {
-                                                "name": "lite_i/dcim_array_0_peak_job[3]"
-                                            },
-                                            {
-                                                "name": "lite_i/dcim_array_0_peak_job[2]"
-                                            },
-                                            {
-                                                "name": "lite_i/dcim_array_0_peak_job[1]"
-                                            },
-                                            {
-                                                "name": "lite_i/dcim_array_0_peak_job[0]"
+                                                "name": "lite_i/dcim_array_0_peak_pipeline_fire[0]"
                                             }
                                         ]
                                     }
                                 ]
                             },
                             {
-                                "name": "probe3",
-                                "id": 3,
+                                "name": "probe6",
+                                "id": 6,
                                 "type": "DATA_TRIGGER",
                                 "direction": "IN",
                                 "isVector": true,
                                 "leftIndex": 0,
-                                "rightIndex": 1,
-                                "portIndex": 3,
+                                "rightIndex": 2,
+                                "portIndex": 6,
                                 "nets": [
                                     {
-                                        "name": "lite_i/dcim_array_0_peak_phase",
+                                        "name": "lite_i/dcim_array_0_peak_pipeline_stall",
                                         "isBus": true,
                                         "subnets": [
                                             {
-                                                "name": "lite_i/dcim_array_0_peak_phase[1]"
+                                                "name": "lite_i/dcim_array_0_peak_pipeline_stall[2]"
                                             },
                                             {
-                                                "name": "lite_i/dcim_array_0_peak_phase[0]"
+                                                "name": "lite_i/dcim_array_0_peak_pipeline_stall[1]"
+                                            },
+                                            {
+                                                "name": "lite_i/dcim_array_0_peak_pipeline_stall[0]"
                                             }
                                         ]
                                     }
                                 ]
                             },
                             {
-                                "name": "probe4",
-                                "id": 4,
+                                "name": "probe7",
+                                "id": 7,
                                 "type": "DATA_TRIGGER",
                                 "direction": "IN",
                                 "isVector": false,
                                 "leftIndex": 0,
                                 "rightIndex": 0,
-                                "portIndex": 4,
+                                "portIndex": 7,
                                 "nets": [
                                     {
                                         "name": "lite_i/dcim_array_0_peak_result_valid",
@@ -258,14 +328,14 @@
                                 ]
                             },
                             {
-                                "name": "probe5",
-                                "id": 5,
+                                "name": "probe8",
+                                "id": 8,
                                 "type": "DATA_TRIGGER",
                                 "direction": "IN",
                                 "isVector": true,
                                 "leftIndex": 0,
                                 "rightIndex": 31,
-                                "portIndex": 5,
+                                "portIndex": 8,
                                 "nets": [
                                     {
                                         "name": "lite_i/dcim_array_0_peak_result_data",

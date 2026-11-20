@@ -1,14 +1,9 @@
 # 测试说明与实测记录
 
-Precision 和 TOPS 共用 [top.bit](../bitstream/top.bit) 和 [top.ltx](../bitstream/top.ltx)。测试产物写在各自目录。
+## 配对烧录文件
 
-## 恢复峰值版烧录文件
-
-下方网络实测使用此前提交的峰值版 `top.bit` 和 `top.ltx`。复现该网络测试时，在仓库根目录恢复配对文件：
-
-```powershell
-git restore --source=ca47abbe1fbb676cdaf0c737f8d4187cccfbb38c --worktree -- top.bit top.ltx
-```
+- Network 和 TOPS 共用 [top_network_tops.bit](../bitstream/top_network_tops.bit) 和 [top_network_tops.ltx](../bitstream/top_network_tops.ltx)。这对文件来自 `ca47abbe` 的 `top.bit` / `top.ltx`。实测两项时可保持同一份镜像在板上。
+- Precision 使用 [top_precision.bit](../bitstream/top_precision.bit) 和 [top_precision.ltx](../bitstream/top_precision.ltx)。
 
 ```text
 test/network/output/    编译缓存、验收报告、推理图、golden cache
@@ -22,7 +17,7 @@ test/topsw/output/      能效（尚未接入）
 python -m pip install -r requirements-fpga-runtime.txt
 ```
 
-上述峰值版 `top.bit` 有 84 989 276 字节，SHA256 `93d0ff5f8388a1238d63d189b65adfaa8f34cd73ae5908e70be4d10351757b06`。
+`top_network_tops.bit` 有 84 989 276 字节，SHA256 `93d0ff5f8388a1238d63d189b65adfaa8f34cd73ae5908e70be4d10351757b06`。
 
 ---
 
@@ -108,7 +103,7 @@ python test/precision/run.py
 
 ## 峰值 TOPS
 
-烧录 `bitstream/top_tops_boardref.bit` 并加载 `bitstream/top_tops_boardref.ltx`。
+烧录 `bitstream/top_network_tops.bit` 并加载 `bitstream/top_network_tops.ltx`。
 确认 XDMA 正常并关闭占用 JTAG 的在线会话后，在仓库根目录运行：
 
 ```powershell
@@ -117,8 +112,6 @@ python test/tops/run.py
 
 脚本自动 arm ILA、通过 XDMA 发任务并校验回读，再打开 Vivado Lab 原生波形。
 采样范围、报告和判定条件见 [峰值测试说明](tops/README.md)。
-
-旧版峰值测试的主机回读记录为 2048/2048 个 128-bit 字匹配。该轮未采 ILA。
 
 ---
 

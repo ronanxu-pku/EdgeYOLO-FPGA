@@ -23,7 +23,7 @@ from ila_runtime import capture_env, find_vivado, open_native_waveforms, resolve
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FPGA_DIR = Path(__file__).resolve().parent / "fpga"
-DEFAULT_LTX = REPO_ROOT / "bitstream" / "top_tops_boardref.ltx"
+DEFAULT_LTX = REPO_ROOT / "bitstream" / "top_network_tops.ltx"
 GENERATOR = REPO_ROOT / "project" / "rtl" / "tb" / "lite_bd" / "module_tb" / "golden_module_tb.py"
 UNIT_TB_DIR = REPO_ROOT / "test" / "network" / "host"
 DEFAULT_RUN_DIR = REPO_ROOT / "test" / "tops" / "output" / "fpga_peak_int8"
@@ -209,7 +209,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--timeout-s", type=float, default=60.0)
     parser.add_argument("--quiet-xdma", action="store_true")
-    parser.add_argument("--ltx", type=Path, help="Matching probe file (default: top_tops_boardref.ltx)")
+    parser.add_argument("--ltx", type=Path, help=f"Matching probe file (default: {DEFAULT_LTX.name})")
     parser.add_argument("--vivado", help="Path to vivado_lab.bat or vivado.bat")
     parser.add_argument("--hw-server", default="localhost:3121")
     parser.add_argument("--hw-target", default="*")
