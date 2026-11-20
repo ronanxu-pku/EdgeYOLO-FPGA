@@ -100,9 +100,9 @@ logs/**
 *.runs/
 /bd/
 
-# Shipped precision programming pair.
+# Shipped FPGA programming pair.
 !/bitstream/top.bit
-!/bitstream/top_precision.ltx
+!/bitstream/top.ltx
 
 # Downloaded / extra model packages
 weihgts/

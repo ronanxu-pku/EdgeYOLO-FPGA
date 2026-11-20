@@ -1,10 +1,10 @@
 # 测试说明与实测记录
 
-精度版烧录与采样使用 [top.bit](../bitstream/top.bit) 和 [top_precision.ltx](../bitstream/top_precision.ltx)。测试产物写在各自目录。
+Precision 和 TOPS 共用 [top.bit](../bitstream/top.bit) 和 [top.ltx](../bitstream/top.ltx)。测试产物写在各自目录。
 
 ## 恢复峰值版烧录文件
 
-网络和峰值 TOPS 脚本使用此前提交的峰值版 `top.bit` 和 `top.ltx`。运行这些测试前，在仓库根目录恢复配对文件：
+下方网络实测使用此前提交的峰值版 `top.bit` 和 `top.ltx`。复现该网络测试时，在仓库根目录恢复配对文件：
 
 ```powershell
 git restore --source=ca47abbe1fbb676cdaf0c737f8d4187cccfbb38c --worktree -- top.bit top.ltx
@@ -110,14 +110,16 @@ python test/precision/run.py
 
 ## 峰值 TOPS
 
-脚本在 `test/tops/`。先按上文恢复峰值版，烧录 `top.bit` 后用配对的 `top.ltx` arm ILA。
+烧录 `bitstream/top.bit` 并配对加载 `bitstream/top.ltx`，在仓库根目录运行：
 
 ```powershell
-python test/tops/fpga/run.py --staging hbm --quiet-xdma --repeat-count 1
-python test/tops/fpga/run.py --report-only --ila-active-cycles 128
+python test/tops/fpga/run.py
 ```
 
-**实测主机数值：PASS_HOST_PENDING_ILA。** 2048/2048 个 128-bit 字一致。未抓 ILA，因此没有 TOPS 数字。补 ILA 后执行上面第二条即可。
+脚本自动 arm ILA、通过 XDMA 发任务并校验回读，再打开 Vivado Lab 原生波形。
+采样范围、报告和判定条件见 [峰值测试说明](tops/fpga/README.md)。
+
+旧版峰值测试的主机回读记录为 2048/2048 个 128-bit 字匹配。该轮未采 ILA。
 
 ---
 

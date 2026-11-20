@@ -5,17 +5,19 @@ import argparse
 import json
 import os
 import shutil
-import subprocess
 import sys
 import tempfile
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from pathlib import Path
-from zipfile import BadZipFile, ZipFile
+from zipfile import BadZipFile
 
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from ila_runtime import capture_env, find_vivado, open_native_waveforms, resolve_ltx, run_vivado
+
 sys.path.insert(0, str(ROOT / "project/rtl/tb/lite_bd/module_tb"))
 import golden_module_tb as golden
 
@@ -98,35 +100,6 @@ def run_xdma(case: str, run_dir: Path, timeout_s: float, quiet_xdma: bool) -> in
 
 
 
-def find_vivado(override: str | None) -> str:
-    if override:
-        executable = shutil.which(override)
-        if executable:
-            return executable
-        raise FileNotFoundError(f"Vivado launcher not found: {override}")
-
-    drive = os.environ.get("SystemDrive", "C:")
-    for product, launcher, variable in (
-        ("Vivado_Lab", "vivado_lab.bat", "XILINX_VIVADO_LAB"),
-        ("Vivado", "vivado.bat", "XILINX_VIVADO"),
-    ):
-        executable = shutil.which(launcher)
-        if executable:
-            return executable
-        install = os.environ.get(variable)
-        if install:
-            candidate = Path(install) / "bin" / launcher
-            if candidate.is_file():
-                return str(candidate)
-        for vendor in ("AMDDesignTools", "Xilinx"):
-            root = Path(f"{drive}/{vendor}")
-            for pattern in (f"*/{product}/bin/{launcher}", f"{product}/*/bin/{launcher}"):
-                matches = sorted(root.glob(pattern), reverse=True)
-                if matches:
-                    return str(matches[0])
-    raise FileNotFoundError("Vivado Lab or Vivado was not found. Use --vivado with the launcher path.")
-
-
 DATA_PROBES = (
     "prec_act_slice",
     "prec_weight_slices",
@@ -137,63 +110,7 @@ DATA_PROBES = (
 )
 
 
-def native_wave_config(capture: Path, destination: Path) -> None:
-    with ZipFile(capture) as archive:
-        configs = [name for name in archive.namelist() if name.lower().endswith(".wcfg")]
-        if len(configs) != 1:
-            raise ValueError(f"Expected one native wave configuration in {capture}")
-        config = ET.fromstring(archive.read(configs[0]))
-
-    rows = {}
-    for wave in config.iter("wvobject"):
-        names = [wave.get("fp_name", "")]
-        names.extend(prop.text or "" for prop in wave.findall("obj_property")
-                     if prop.get("name") in {"ObjectShortName", "ElementShortName"})
-        for name in names:
-            probe = name.rsplit("/", 1)[-1].split("[", 1)[0]
-            if probe in DATA_PROBES:
-                rows[probe] = wave
-                break
-    if len(rows) != len(DATA_PROBES):
-        missing = ", ".join(probe for probe in DATA_PROBES if probe not in rows)
-        raise ValueError(f"Missing native waveform rows in {capture}: {missing}")
-
-    for wave in config.findall("wvobject"):
-        config.remove(wave)
-    for probe in DATA_PROBES:
-        config.append(rows[probe])
-    size = config.find("WVObjectSize")
-    if size is not None:
-        size.set("size", str(len(DATA_PROBES)))
-
-    # Native ILA wave configs use one fs per sample when the full window ends at 1025 fs.
-    zoom_end = config.find("zoom_setting/ZoomEndTime")
-    if zoom_end is not None and zoom_end.get("time") in {"1023fs", "1024fs", "1025fs"}:
-        for element, sample in (("ZoomStartTime", 28), ("ZoomEndTime", 54), ("Cursor1Time", 32)):
-            node = config.find(f"zoom_setting/{element}")
-            if node is not None:
-                node.set("time", f"{sample}fs")
-
-    ET.ElementTree(config).write(destination, encoding="utf-8", xml_declaration=True)
-
-
-def run_vivado(vivado: str, script: Path, cwd: Path, env: dict, mode: str):
-    flags = ["-mode", mode, "-source", str(script), "-notrace", "-nolog", "-nojournal"]
-    executable = None
-    command = [vivado, *flags]
-    if Path(vivado).suffix.lower() in {".bat", ".cmd"}:
-        env.update(DCIM_PRECISION_VIVADO=vivado, DCIM_PRECISION_SCRIPT=str(script))
-        executable = os.environ["COMSPEC"]
-        command = (
-            f'cmd.exe /d /v:off /s /c ""%DCIM_PRECISION_VIVADO%" -mode {mode} '
-            '-source "%DCIM_PRECISION_SCRIPT%" -notrace -nolog -nojournal"'
-        )
-    return subprocess.run(command, executable=executable, cwd=cwd, env=env,
-                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                          text=True, errors="replace")
-
-
-def open_native_waveforms(vivado: str, run_dir: Path, cases: tuple[str, ...]) -> int:
+def open_precision_waveforms(vivado: str, run_dir: Path, cases: tuple[str, ...]) -> int:
     captures = {}
     for case in cases:
         path = run_dir / f"{case}.ila"
@@ -203,39 +120,18 @@ def open_native_waveforms(vivado: str, run_dir: Path, cases: tuple[str, ...]) ->
             raise FileNotFoundError(f"No native {case} ILA archive under {run_dir}. Run run.py to capture it.")
         captures[case] = path
 
-    with tempfile.TemporaryDirectory(prefix="dcim_ila_view_", ignore_cleanup_errors=True) as scratch:
-        work = Path(scratch)
-        for case, path in captures.items():
-            native_wave_config(path, work / f"{case}.wcfg")
-            shutil.copyfile(path, work / f"{case}.ila")
-        env = dict(os.environ, DCIM_PRECISION_VIEW_CASES=" ".join(cases), DCIM_PRECISION_VIEW_ROOT=str(work))
-        script = Path(__file__).with_name("view.tcl").resolve()
-        opened = run_vivado(vivado, script, Path(tempfile.gettempdir()), env, "gui")
-        if opened.returncode:
-            print("\n".join(opened.stdout.splitlines()[-20:]), file=sys.stderr)
-        return opened.returncode
+    return open_native_waveforms(vivado, captures, DATA_PROBES, last_sample=54)
 
 
 def capture_on_board(args: argparse.Namespace, cases: tuple[str, ...], run_dir: Path) -> int:
     vivado = find_vivado(args.vivado)
-    ltx = ROOT / "bitstream/top_precision.ltx"
-    if not ltx.is_file():
-        raise FileNotFoundError(ltx)
+    ltx = resolve_ltx(ROOT, args.ltx)
     if run_dir.exists():
         raise FileExistsError(run_dir)
 
-    env = dict(
-        os.environ,
-        DCIM_PRECISION_PYTHON=sys.executable,
-        DCIM_PRECISION_LTX=str(ltx),
-        DCIM_PRECISION_CASES=" ".join(cases),
-        DCIM_PRECISION_HW_SERVER=args.hw_server,
-        DCIM_PRECISION_HW_TARGET=args.hw_target,
-        DCIM_PRECISION_TIMEOUT=str(args.timeout_s),
-        DCIM_PRECISION_QUIET=str(int(args.quiet_xdma)),
-    )
-    for name in ("PATH", "PYTHONHOME", "PYTHONPATH"):
-        env[f"DCIM_PRECISION_HOST_{name}"] = os.environ.get(name, "")
+    env = capture_env(sys.executable, ltx, args.hw_server, args.hw_target)
+    env.update(DCIM_PRECISION_CASES=" ".join(cases), DCIM_PRECISION_TIMEOUT=str(args.timeout_s),
+               DCIM_PRECISION_QUIET=str(int(args.quiet_xdma)))
     script = Path(__file__).with_name("capture.tcl").resolve()
     with tempfile.TemporaryDirectory(prefix="dcim_ila_capture_", ignore_cleanup_errors=True) as scratch:
         work = Path(scratch)
@@ -258,9 +154,10 @@ def capture_on_board(args: argparse.Namespace, cases: tuple[str, ...], run_dir: 
         for case, result in results.items():
             path = run_dir / f"{case}.ila"
             shutil.copyfile(work / case / "capture.ila", path)
-            print(f"FPGA PASS {case}: {result['actual_hex']}  {path}", flush=True)
+            print(f"FPGA PASS {case}: {result['actual_hex']} ({result['actual']}) "
+                  f"matches the host and Golden, write cycle {result['write_cycle']}: {path}", flush=True)
 
-    return open_native_waveforms(vivado, run_dir, cases)
+    return open_precision_waveforms(vivado, run_dir, cases)
 
 
 def main() -> int:
@@ -272,6 +169,7 @@ def main() -> int:
     execution.add_argument("--view-only", type=Path, metavar="CAPTURE_DIR",
                            help="Open a saved run in the native Vivado waveform viewer")
     execution.add_argument("--xdma-only", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--ltx", type=Path, help="Probe file matching the programmed FPGA")
     parser.add_argument("--vivado", help="Path to vivado_lab.bat or vivado.bat")
     parser.add_argument("--hw-server", default="localhost:3121")
     parser.add_argument("--hw-target", default="*", help="Vivado JTAG target name or pattern")
@@ -289,7 +187,7 @@ def main() -> int:
 
     try:
         if args.view_only:
-            return open_native_waveforms(find_vivado(args.vivado), args.view_only.resolve(), cases)
+            return open_precision_waveforms(find_vivado(args.vivado), args.view_only.resolve(), cases)
         if args.xdma_only:
             return run_xdma(args.case, run_dir, args.timeout_s, args.quiet_xdma)
         if args.prepare_only:

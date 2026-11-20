@@ -1,22 +1,24 @@
 #!/usr/bin/env python3
-"""Run the 64-job streamed INT8 peak-compute case on a Windows XDMA FPGA.
-
-The FPGA run proves numerical correctness.  The compute-active cycle count is
-read manually from the Vivado ILA and supplied with --ila-active-cycles so the
-TOPS calculation is performed and recorded by the host.
-"""
+"""Run the streamed INT8 case and open its native Vivado TOPS waveform."""
 
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
+import xml.etree.ElementTree as ET
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from zipfile import BadZipFile
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from ila_runtime import capture_env, find_vivado, open_native_waveforms, resolve_ltx, run_vivado
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -177,10 +179,14 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run and report the exact-fit 2.048-TOPS INT8 FPGA case"
     )
-    parser.add_argument("--run-dir", type=Path, default=DEFAULT_RUN_DIR)
+    parser.add_argument("--run-dir", type=Path)
     parser.add_argument("--regenerate", action="store_true", help="regenerate test vectors")
-    parser.add_argument("--prepare-only", action="store_true", help="only generate test files")
-    parser.add_argument(
+    execution = parser.add_mutually_exclusive_group()
+    execution.add_argument("--prepare-only", action="store_true", help="only generate test files")
+    execution.add_argument("--view-only", type=Path, metavar="CAPTURE",
+                           help="open a saved TOPS .ila file or run directory")
+    execution.add_argument("--xdma-only", action="store_true", help=argparse.SUPPRESS)
+    execution.add_argument(
         "--report-only",
         action="store_true",
         help="do not touch FPGA; add the observed ILA cycles to the previous report",
@@ -200,6 +206,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--timeout-s", type=float, default=60.0)
     parser.add_argument("--quiet-xdma", action="store_true")
+    parser.add_argument("--ltx", type=Path, help="Probe file matching the programmed FPGA")
+    parser.add_argument("--vivado", help="Path to vivado_lab.bat or vivado.bat")
+    parser.add_argument("--hw-server", default="localhost:3121")
+    parser.add_argument("--hw-target", default="*")
     parser.add_argument(
         "--staging",
         choices=("hbm", "preload"),
@@ -211,7 +221,7 @@ def parse_args() -> argparse.Namespace:
         "--measure-power",
         action="store_true",
         help="sample VCU128 INA226 rails (SC UART / BoardUI protocol) idle vs "
-             "repeat, then report ΔP and TOPS/W",
+             "repeat, then report the power difference and TOPS/W",
     )
     parser.add_argument("--power-port", default=None, help="SC UART, default FTDI ...D")
     parser.add_argument("--power-idle-s", type=float, default=3.0)
@@ -333,18 +343,93 @@ class PowerSampler:
         return out
 
 
+def open_peak_waveform(vivado: str, path: Path) -> int:
+    from verify_peak import PROBES
+
+    if path.is_dir():
+        path = path / "peak_int8.ila"
+    return open_native_waveforms(vivado, {"peak_int8": path}, tuple(PROBES), last_sample=185)
+
+
+def capture_peak(args: argparse.Namespace) -> int:
+    from verify_peak import verify_peak
+
+    vivado = find_vivado(args.vivado)
+    ltx = resolve_ltx(REPO_ROOT, args.ltx)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    run_dir = (args.run_dir or DEFAULT_RUN_DIR / stamp).resolve()
+    if run_dir.exists():
+        raise FileExistsError(run_dir)
+    env = capture_env(sys.executable, ltx, args.hw_server, args.hw_target)
+    env.update(DCIM_TOPS_TIMEOUT=str(args.timeout_s), DCIM_TOPS_QUIET=str(int(args.quiet_xdma)),
+               DCIM_TOPS_STAGING=args.staging)
+    script = Path(__file__).with_name("capture.tcl")
+    print("Arming TOPS ILA and running the 64-job INT8 workload...", flush=True)
+    with tempfile.TemporaryDirectory(prefix="dcim_tops_capture_", ignore_cleanup_errors=True) as scratch:
+        work = Path(scratch) / "run"
+        env["DCIM_TOPS_CAPTURE_ROOT"] = str(work)
+        batch = run_vivado(vivado, script, Path(tempfile.gettempdir()), env, "batch")
+        if batch.returncode:
+            print("\n".join(batch.stdout.splitlines()[-24:]), file=sys.stderr)
+            return batch.returncode
+
+        archive = work / "peak_int8.ila"
+        if not archive.is_file() or not archive.stat().st_size:
+            raise ValueError("Vivado did not save a native TOPS ILA capture")
+        report = load_previous_report(work / "fpga_peak_report.json")
+        run_dir.mkdir(parents=True, exist_ok=False)
+        capture = run_dir / archive.name
+        shutil.copyfile(archive, capture)
+        try:
+            evidence = verify_peak(work, report)
+        except (OSError, ValueError) as error:
+            raise ValueError(f"{error}. View the captured samples with --view-only \"{capture}\"") from error
+        cycles = evidence["issue_cycles"]
+        tops = calculate_tops(cycles, args.frequency_mhz, OPERATIONS_PER_ROUND)
+        report.update(
+            run_dir=str(run_dir), status="PASS" if tops >= TOPS_REQUIREMENT else "FAIL_TOPS",
+            frequency_mhz=args.frequency_mhz, ila_active_cycles=cycles, calculated_peak_tops=tops,
+            meets_2tops=tops >= TOPS_REQUIREMENT, ila_capture=evidence,
+            ila_cycle_qualification="elapsed from first issue through last issue, inclusive",
+        )
+        report.pop("expected_ila")
+        (run_dir / "fpga_peak_report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+
+    print(f"{report['status']} INT8: {evidence['host_words_matched']} words match, "
+          f"{cycles} cycles @ {args.frequency_mhz:g} MHz, {tops:.3f} TOPS")
+    print(f"Native capture: {capture}", flush=True)
+    view_result = open_peak_waveform(vivado, capture)
+    return view_result or int(not report["meets_2tops"])
+
+
 def main() -> int:
     args = parse_args()
-    run_dir = args.run_dir.resolve()
-    report_path = run_dir / "fpga_peak_report.json"
+    if args.view_only:
+        try:
+            return open_peak_waveform(find_vivado(args.vivado), args.view_only.resolve())
+        except (OSError, RuntimeError, ValueError, BadZipFile, ET.ParseError) as error:
+            print(f"TOPS waveform error: {error}", file=sys.stderr)
+            return 1
 
-    if args.prepare_only and args.report_only:
-        raise SystemExit("--prepare-only and --report-only are mutually exclusive")
+    if not (args.prepare_only or args.report_only or args.xdma_only or args.measure_power
+            or args.ila_active_cycles is not None or args.repeat_count not in (None, 1)):
+        if os.name != "nt":
+            raise SystemExit("the FPGA runner requires Windows and the XDMA driver")
+        try:
+            return capture_peak(args)
+        except (OSError, RuntimeError, ValueError, BadZipFile, ET.ParseError) as error:
+            print(f"TOPS test failed: {error}", file=sys.stderr)
+            return 1
+
+    run_dir = (args.run_dir or DEFAULT_RUN_DIR).resolve()
+    report_path = run_dir / "fpga_peak_report.json"
 
     if args.report_only:
         if args.ila_active_cycles is None:
             raise SystemExit("--report-only requires --ila-active-cycles from the ILA capture")
         report = load_previous_report(report_path)
+        if "ila_capture" in report:
+            raise SystemExit("The native capture report already contains the measured ILA cycles")
         repeat_count = int(report.get("benchmark_repeat_count", 1))
         if args.repeat_count is not None and args.repeat_count != repeat_count:
             raise SystemExit("--repeat-count must match the previously generated FPGA run")
@@ -365,7 +450,8 @@ def main() -> int:
                 sys.path.insert(0, str(extra))
         from xdma_win import ChipRunnerWin  # pylint: disable=import-outside-toplevel
 
-        print("[fpga] ILA must be armed before this point (trigger: peak_compute_mask == 0xff)")
+        if not args.xdma_only:
+            print("[fpga] Arm the ILA before running in manual mode")
         compute_s = (128 * repeat_count) / (args.frequency_mhz * 1e6)
         timeout_s = max(args.timeout_s, compute_s + 30.0)
         print(f"[fpga] compute window ≈ {compute_s:.3f} s  (repeat={repeat_count}, timeout={timeout_s:.1f}s)")
@@ -409,7 +495,7 @@ def main() -> int:
                 on_decoder_start=on_decoder_start,
                 on_decoder_done=on_decoder_done,
             )
-            host_pass = all(bool(item.get("pass")) for item in results)
+            host_pass = bool(results) and all(bool(item.get("pass")) for item in results)
             error = None
         except Exception as exc:  # preserve a machine-readable failure report
             results = []
@@ -471,7 +557,7 @@ def main() -> int:
 
     write_report(report_path, report)
 
-    if report["status"] == "PASS_HOST_PENDING_ILA":
+    if report["status"] == "PASS_HOST_PENDING_ILA" and not args.xdma_only:
         print("\nHost result PASS. Export/check the ILA waveform, then run:")
         expected_cycles = 128 * int(report.get("benchmark_repeat_count", 1))
         print(

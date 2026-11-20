@@ -3,7 +3,11 @@ import argparse
 import csv
 import json
 import re
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from ila_runtime import parse_bus
 
 PROBES = (
     "stage_valid", "act_slice", "weight_slices", "partial_products",
@@ -13,17 +17,6 @@ PROBES = (
 
 def signed(value, width):
     return value - (1 << width) if value & (1 << (width - 1)) else value
-
-
-def parse_bus(value, radix, width):
-    text = value.strip().replace("_", "")
-    match = re.fullmatch(r"(?:\d+)?'([hbdo])([0-9a-fA-F]+)", text)
-    if match:
-        return int(match[2], {"h": 16, "b": 2, "d": 10, "o": 8}[match[1]])
-    base = {"BIN": 2, "BINARY": 2, "OCT": 8, "SIGNED": 10, "UNSIGNED": 10, "DEC": 10}.get(radix, 16)
-    if text.lower().startswith(("0x", "0b")):
-        return int(text, 0)
-    return int(text, base) & ((1 << width) - 1)
 
 
 def read_stages(path):

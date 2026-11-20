@@ -1,92 +1,55 @@
-# FPGA 实机 INT8 峰值测试
+# FPGA 实机 INT8 峰值算力
 
-## 前提
-
-- Windows XDMA 驱动已枚举设备；
-- FPGA 使用 [此前提交的峰值版](../../TESTING.md#恢复峰值版烧录文件) 或同配置重新综合生成的 `.bit`；
-- Hardware Manager 加载同一次实现的 `.ltx`；
-- 实际 DCIM 时钟频率已知，目标为 250 MHz。
-
-不要混用不同 attempt 的 `.bit` 与 `.ltx`。
-
-本目录日常入口只有 `run.py`：
-
-```text
-test/tops/fpga/
-  run.py     实机 INT8 峰值（唯一日常入口）
-  README.md
-  tools/     HBM/CDMA 调试、功耗 UART
-  synth/     OOC 综合、BD 校验、时序 A/B
-  docs/      release 与 HBM handoff
-```
-
-## ILA
-
-`peak_tops_ila` 只保留六个必要探针：
-
-| probe | 信号 | 用途 |
-|---|---|---|
-| 0 | `peak_compute_mask[7:0]` | 8 Tile 同拍真实计算 |
-| 1 | `peak_dcim_input[31:0]` | 与 Host 输入对应 |
-| 2 | `peak_job[5:0]` | 连续 job 0..63 |
-| 3 | `peak_phase[1:0]` | INT8 为 0、1 |
-| 4 | `peak_result_valid` | 结果判定周期 |
-| 5 | `peak_result_data[31:0]` | 与 Host 结果对应 |
-
-推荐 Data Depth=1024、Trigger Position=256、Window Count=1，触发条件为
-`peak_compute_mask == 8'hff`。Arm 后运行：
+在接有 VCU128 JTAG 和 XDMA 的 Windows 主机，使用联合版的
+`bitstream/top.bit` 和同目录的 `top.ltx`。在 Vivado Lab 烧录这对文件一次，
+Precision 和 TOPS 都可运行。关闭占用 JTAG 的在线 Hardware Manager 会话后，在本目录执行：
 
 ```powershell
-python test/tops/fpga/run.py
+python run.py
 ```
 
-脚本生成 `M=64,K=64,N=128` 固定 seed 数据，上传激活和8组权重，执行整层
-streamed DCIM，回读并比较全部 2048 个 128-bit 结果字。Host 通过后先得到
-`PASS_HOST_PENDING_ILA`。
-
-普通单次峰值正确性测试（repeat=1，也是默认值）：
+默认测试一轮 `M=64, K=64, N=128` 的 INT8 矩阵乘。脚本先 arm `peak_tops_ila`，通过
+XDMA 发任务与回读，逐拍校验采样，然后打开 Vivado Lab 原生波形。输出目录保存
+`peak_int8.ila` 和同轮的 `fpga_peak_report.json`。只打开历史波形时，在本目录执行：
 
 ```powershell
-python test/tops/fpga/run.py --repeat-count 1
+python run.py --view-only <采样目录或 peak_int8.ila>
 ```
 
-连续 benchmark 测试由同一条 Host 命令配置轮数，例如4轮波形证明：
+Vivado Lab 在自定义位置可传 `--vivado <启动器路径>`，probe 文件放在别处可传 `--ltx <top.ltx路径>`。
+先确认该文件对应板上已经烧录的 bitstream。
 
-```powershell
-python test/tops/fpga/run.py --repeat-count 4 --timeout-s 120
-```
+## 波形怎么读
 
-用于功耗表稳定读数时可以增大轮数。例如250 MHz下每轮128周期，
-`repeat-count=10000000` 的纯计算窗口约5.12秒。计算结束后仍只回读并检查最后一轮
-的同一组2048个128-bit结果字。
+| 阶段 | 信号 | 读法 |
+| --- | --- | --- |
+| 输入 | `issue_mask`、`issue_phase_index`、`act_ch0_nibble` | 掩码 `FF` 表示 8 个 Tile 同拍接受输入。索引 `0…127` 对应 job 0 相位 0 到 job 63 相位 1。索引最低位是相位。 |
+| 中间 | `ma_accept_mask`、`ma_ch0_col_sums` | 掩码为 `FF` 时 8 个 Tile 同拍交付列和。两段 14 bit 分别是 Tile 0 通道 0 的低权重列和高权重列，低列在低 14 bit。 |
+| 输出 | `write_done_mask`、`write_job`、`write_ch0` | 掩码为 `FF` 时 8 个 Tile 完成该 job 最后一拍 OBUF 写入。每隔 2 拍应有一次，依次读 job 0 到 63。数据取 Tile 0 通道 0。 |
 
-## 波形与报告
+数据只在同阶段掩码有效时读。首段按各阶段的**第一个、第二个有效拍**对齐 job 0 的两个相位，
+因为输入、列和和写回在流水线上同时处理不同的 job。第一笔应看到激活分片 `3 → 9`、
+低列和高列 `(-845, 78)` 与 `(3144, −224)`。各相位按 `低列 + 16 × 高列` 合并成
+`403` 和 `−440`，写回值为 `403 × 16 − 440 = 6008 = 0x00001778`。
+脚本还校验整轮 128 个相位的列和、64 笔 Tile 0 写回，以及主机回读的 2,048 个 128-bit 结果字。
 
-正确的峰值窗口应为：
+## PPT 怎么标注
 
-- `peak_compute_mask=ff` 连续 `128 × repeat_count` 个采样周期；
-- `peak_job=0..63`，每个 job 恰有 phase 0、1；
-- 每个轮次边界必须是 `job63/phase1` 紧邻 `job0/phase0`；
-- job0 两拍输入预期为 `b92d4ab3`、`db342919`；
-- `peak_result_valid=1` 时，第一结果预期为 `00001778`。
+主图直接截 Vivado Lab 原生窗口。用游标从 `issue_phase_index=0` 的有效拍标到
+`127` **之后一拍**。这个差值应为 128 拍。保留尾部 `write_job=63` 完成的采样，
+并在首段放大图标出输入、MA 和写回重叠的位置。图边写单轮报告里的三个实测结果：
 
-随后由 Host 计算并生成最终报告：
+- 8/8 Tile，连续 128 拍接受输入，128 个 MA 事件，64 批写完，每批相隔 2 拍。
+- XDMA 回读 2,048/2,048 个 128-bit 字与 Golden 一致。
+- 按一次 MAC 计两次操作，`64 × 8 × 16 × 64 × 2 = 1,048,576 OP`。报告确认
+  128 拍且计算时钟为 250 MHz 时，写 `1,048,576 ÷ (128 × 4 ns) = 2.048 TOPS @ INT8 ≥ 2.000 TOPS`。
 
-```powershell
-python test/tops/fpga/run.py --report-only --ila-active-cycles 512 --frequency-mhz 250
-```
+以上数字是判定条件。PPT 上的 PASS 来自成功完成的实机运行报告。
 
-上例是repeat=4，因此计算量为 `4×2×64×64×128=4,194,304 OPS`，512周期@250 MHz对应
-`2.048 TOPS@INT8`。只有 mask 全为 `ff` 的连续周期可以计入。
+## 离线和手动模式
 
-`repeat-count=1` 时仍使用1,048,576 OPS和128周期，计算结果同为2.048 TOPS。
-
-只生成数据或强制重生成：
-
-```powershell
-python test/tops/fpga/run.py --prepare-only
-python test/tops/fpga/run.py --regenerate
-```
+`--prepare-only` 只生成激励。多轮 benchmark、功耗测试和旧版手动 `--report-only`
+沿用此前流程。该流程内的手填周期与联合版单轮自动校验是各自的报告。
 
 ## 完整 BD 接口检查
 
@@ -166,7 +129,7 @@ timing 状态、WNS、WHS 选择获胜项，只对 winner 发布统一的 `post_
 
 ## INT8 / INT16 精度 ILA
 
-VCU128 精度测试使用 [top.bit](../../../bitstream/top.bit) 和同次实现的 [top_precision.ltx](../../../bitstream/top_precision.ltx)。在 Vivado Hardware Manager 里配对加载这两个文件。
+VCU128 精度测试也使用 `bitstream/` 中同一次实现生成的 `top.bit` 和 `top.ltx`。
 
 `precision_ila` 以 250 MHz 采样 Tile 0 的 7 组探针。INT8 和 INT16 共用探针，可逐拍观察输入分片、部分积、列和、移位累加和 OBUF 写回。触发条件为 `prec_stage_valid[0] == 1`。
 
