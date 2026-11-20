@@ -103,6 +103,7 @@ logs/**
 # Shipped FPGA programming pair.
 !/bitstream/top.bit
 !/bitstream/top.ltx
+!/bitstream/top_[0-3].bit
 
 # Downloaded / extra model packages
 weihgts/
