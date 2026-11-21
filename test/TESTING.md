@@ -6,7 +6,9 @@
 - Precision 使用 [top_precision.bit](../bitstream/top_precision.bit) 和 [top_precision.ltx](../bitstream/top_precision.ltx)。
 
 ```text
-test/network/output/    编译缓存、验收报告、推理图、golden cache
+test/network/output/    每张图片的 result.png 和 result.json
+test/network/cached/    编译产物、主机参考缓存、中间数据和历史输出
+test/network/scripts/   主机推理（host）、校验（golden）、XDMA 工具（xdma）
 test/tops/output/       峰值上板向量与报告
 test/topsw/output/      能效（尚未接入）
 ```
@@ -26,6 +28,7 @@ python -m pip install -r requirements-fpga-runtime.txt
 - `--model` 选择 `yolo`、`resnet` 或 `all`，默认 `all`。
 - `--precision` 选择 `int8`、`int16` 或 `both`，默认 `both`。
 - `--num` 指定每个模型和精度组合的图片数，范围 1–20，默认 1。
+- `--conf` 指定YOLO检测置信度阈值，默认0.25；`--conf 0.15`可复现原低阈值输出。
 
 单图：
 
@@ -46,7 +49,25 @@ python test/network/run.py --model resnet --precision int8 --num 20
 python test/network/run.py --model resnet --precision int16 --num 20
 ```
 
-网络测试自动复用已有编译产物，缓存缺失或不完整时重新编译。FPGA 跑完后在主机计算 compiler golden，并比对读回的特征。单图打印推理和比对结果，产物在 `test/network/output/inference/`。批量测试打印详细日志，验收报告在 `test/network/output/acceptance/`。
+网络测试复用 `cached/compiled/` 中的编译产物，缓存缺失或不完整时重新编译。FPGA 跑完后在主机计算参考特征，将其存入 `cached/golden_cache/`，并比对 FPGA 回读特征。中间特征、二进制读回和计时文件放在 `cached/intermediate/`，单个用例结束后自动清理。单图终端显示检测或分类结果及比对状态，批量运行还显示计时、各输出路径和通过数量。
+
+单图和批量运行都将每张图片的结果直接写到 `output/<模型>_<精度>_<图片编号>_<执行时间>/`。YOLO 使用 COCO 原图 ID，例如 `000000000139.jpg` 对应 `139`。ResNet 使用图片在清单中的位置，从 1 开始。同一次运行的时间戳相同。
+
+```text
+test/network/output/
+    yolo_int8_139_20261121_143025_123456/
+        result.png
+        result.json
+    resnet_int8_2_20261121_143025_123456/
+        result.png
+        result.json
+```
+
+YOLO的 `result.json` 保存类别、置信度 `conf`、检测框 `bbox` 和阈值；坐标为原图像素，顺序为 `[x1, y1, x2, y2]`。ResNet保存Top-k类别及原始得分，`score_type`为`logit`，得分不是概率。`result`字段与终端的`result: same/different`一致，表示FPGA输出特征与主机参考结果的数值比对。绘图和JSON使用同一组预测结果。
+
+首次运行会将已有编译产物和主机参考缓存迁入 `cached/`。可识别的旧版推理、验收结果和重复缓存归档到 `cached/legacy/<执行时间>/`。
+
+默认阈值0.25会过滤置信度较低的候选框，也可能漏掉真实目标。以下历史实测的YOLO“5框”对应原阈值0.15。
 
 **单图实测：四套 golden max_abs=0。**
 

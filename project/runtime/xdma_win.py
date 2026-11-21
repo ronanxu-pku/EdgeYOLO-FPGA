@@ -19,6 +19,8 @@ from typing import Optional
 
 _THIS_DIR = Path(__file__).resolve().parent
 REPO_ROOT = _THIS_DIR.parents[1]
+NETWORK_SCRIPTS = REPO_ROOT / "test" / "network" / "scripts"
+XDMA_DIR = NETWORK_SCRIPTS / "xdma"
 
 
 def _resolve_xdma_rw_exe() -> Path:
@@ -26,12 +28,12 @@ def _resolve_xdma_rw_exe() -> Path:
     if env_path:
         return Path(env_path).expanduser()
     for candidate in (
-        REPO_ROOT / "test" / "network" / "bin" / "xdma_rw.exe",
-        REPO_ROOT / "test" / "network" / "bin" / "xdma_rw",
+        XDMA_DIR / "xdma_rw.exe",
+        XDMA_DIR / "xdma_rw",
     ):
         if candidate.exists():
             return candidate
-    return REPO_ROOT / "test" / "network" / "bin" / "xdma_rw.exe"
+    return XDMA_DIR / "xdma_rw.exe"
 
 
 XDMA_RW_EXE = _resolve_xdma_rw_exe()
@@ -39,7 +41,7 @@ XDMA_RW_EXE = _resolve_xdma_rw_exe()
 try:
     import sys as _sys
     _tools = REPO_ROOT / "project" / "runtime"
-    _host = REPO_ROOT / "test" / "network" / "host"
+    _host = NETWORK_SCRIPTS / "host"
     for _extra in (_tools, _host):
         if str(_extra) not in _sys.path:
             _sys.path.insert(0, str(_extra))
@@ -182,7 +184,7 @@ def _winapi():
 
 def _xdma_interface_path() -> str | None:
     """XDMA device-interface path with no channel suffix. Never open this path itself."""
-    info_exe = REPO_ROOT / "test" / "network" / "bin" / "xdma_info.exe"
+    info_exe = XDMA_DIR / "xdma_info.exe"
     if info_exe.is_file():
         try:
             proc = subprocess.run(
@@ -308,7 +310,7 @@ class XDMAWin:
         if not self._direct and not Path(self.exe).exists():
             raise FileNotFoundError(
                 f"xdma_rw.exe not found: {self.exe}. "
-                "Set XDMA_RW_EXE, or extract test/network/bin.zip so test/network/bin/xdma_rw.exe exists."
+                "Set XDMA_RW_EXE or restore test/network/scripts/xdma/xdma_rw.exe."
             )
 
     def _try_open_direct(self) -> None:

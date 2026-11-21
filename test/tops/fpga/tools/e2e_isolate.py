@@ -11,10 +11,11 @@ from pathlib import Path
 import numpy as np
 
 REPO = Path(__file__).resolve().parents[4]
-UNIT = REPO / "test" / "network" / "host"
+SCRIPTS = REPO / "test" / "network" / "scripts"
+UNIT = SCRIPTS / "host"
 RUNTIME = REPO / "project" / "runtime"
 COMPILER = REPO / "project" / "compiler"
-for p in (UNIT, RUNTIME, str(COMPILER), str(COMPILER.parent)):
+for p in (UNIT, SCRIPTS / "golden", RUNTIME, str(COMPILER), str(COMPILER.parent)):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
@@ -36,7 +37,7 @@ from xdma_win import (  # noqa: E402
 from compiler.codegen.encode_isa import encode_ops  # noqa: E402
 from compare_one_shot import run_yolo_compiler_golden, _stats  # noqa: E402
 
-YOLO_BUILD = REPO / "test" / "network" / "output" / "compiled" / "80832ec_attempt1" / "yolo_coco_int8"
+YOLO_BUILD = REPO / "test" / "network" / "cached" / "compiled" / "80832ec_attempt1" / "yolo_coco_int8"
 YOLO_IMG = REPO / "test" / "network" / "examples" / "coco" / "000000000139.jpg"
 YOLO_PARSED = REPO / "project" / "model" / "yolov5n_coco50k_qat" / "parsed_int8"
 ABC_DIR = REPO / "test" / "tops" / "output" / "fpga" / "dcim_abc"

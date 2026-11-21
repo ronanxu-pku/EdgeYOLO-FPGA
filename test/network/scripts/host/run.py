@@ -24,16 +24,17 @@ from pathlib import Path
 import numpy as np
 
 _THIS = Path(__file__).resolve()
+REPO = _THIS.parents[4]
 sys.path.insert(0, str(_THIS.parent))
-sys.path.insert(0, str(_THIS.parents[3] / "project" / "rtl" / "tb" / "lite_bd" / "module_tb"))
-sys.path.insert(0, str(_THIS.parents[3] / "project" / "runtime"))
+sys.path.insert(0, str(REPO / "project" / "rtl" / "tb" / "lite_bd" / "module_tb"))
+sys.path.insert(0, str(REPO / "project" / "runtime"))
 
-RUNS_BASE = _THIS.parents[3] / "test" / "network" / "output" / "host_e2e"
+RUNS_BASE = _THIS.parents[2] / "cached" / "host_e2e"
 IMG_SIZE_YOLO = 320
 IMG_SIZE_RESNET = 224
 
 # 重新 QAT 后 act_scale 会变化，从 parsed/network.json 读取第一层 act_scale
-_YOLO_PARSED = (_THIS.parents[3] / "project" / "model" / "yolov5n_coco50k_qat"
+_YOLO_PARSED = (REPO / "project" / "model" / "yolov5n_coco50k_qat"
                 / "parsed_int8" / "network.json")
 def _load_act_scale() -> float:
     """从 parsed network.json 读取 input_act_scale (用于量化输入图像)"""
@@ -120,7 +121,7 @@ def preprocess_resnet18(img_rgb: np.ndarray) -> np.ndarray:
 
     # QA: 需要 ResNet18 的 input act_scale
     # 从 parsed weights 获取
-    weights_dir = _THIS.parents[3] / "project" / "model" / "resnet18" / "parsed" / "weights"
+    weights_dir = REPO / "project" / "model" / "resnet18" / "parsed" / "weights"
     npz = np.load(weights_dir / "conv1.npz")
     # input scale 通常在第一层的输入定义中
     # 对于ResNet18 W8A8, 假设输入 scale 使 [-128,127] 覆盖归一化后的范围
@@ -214,7 +215,7 @@ def run_yolov5n_inference(runner, img_path: str, dry_run: bool):
 
     # 后处理: detect head (receives hard_quant'd features)
     print("  Running detect head...")
-    weights_dir = str(_THIS.parents[3] / "project" / "model" / "yolov5n" / "parsed" / "weights")
+    weights_dir = str(REPO / "project" / "model" / "yolov5n" / "parsed" / "weights")
     head = DetectHead(weights_dir)
     raw_preds = head.forward(x17_hq, x20_hq, x23_hq)
 
@@ -440,7 +441,7 @@ def main():
         images = sorted(glob(str(Path(args.val_dir) / "*.jpg")))[:args.max_images]
     else:
         # 默认使用验证集
-        default_dir = _THIS.parents[3] / "project" / "model" / "algorithm" / "Infrared-Object-Detection" / "datasets" / "infrared" / "images" / "val"
+        default_dir = REPO / "project" / "model" / "algorithm" / "Infrared-Object-Detection" / "datasets" / "infrared" / "images" / "val"
         if default_dir.exists():
             images = sorted(str(p) for p in default_dir.glob("*.jpg"))[:args.max_images]
 

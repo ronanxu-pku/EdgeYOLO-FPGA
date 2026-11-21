@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[4]
-UNIT = REPO / "test" / "network" / "host"
+UNIT = REPO / "test" / "network" / "scripts" / "host"
 sys.path.insert(0, str(UNIT))
 
 from hbm_flow import _preload_rows  # noqa: E402

@@ -6,7 +6,7 @@ Uses scale=1.0 spatial dims and real act_scale / DQA outputs from the 3-layer
 YOLO chain. Large tensors in hex files; SVH holds metadata + qscale only.
 
 Usage:
-  python3 tools/golden_qa_standalone.py
+  python3 test/network/scripts/golden/golden_qa_standalone.py
 """
 from __future__ import annotations
 
@@ -154,11 +154,9 @@ def main() -> None:
         default=os.path.join(
             os.path.dirname(os.path.abspath(__file__)),
             "..",
-            "rtl",
-            "vpu",
-            "tb",
-            "standalone",
-            "generated",
+            "..",
+            "cached",
+            "qa_standalone",
         ),
     )
     args = ap.parse_args()

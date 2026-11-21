@@ -16,7 +16,7 @@ from typing import Iterable
 import numpy as np
 
 _THIS = Path(__file__).resolve().parent
-REPO_ROOT = _THIS.parents[2]
+REPO_ROOT = _THIS.parents[3]
 sys.path.insert(0, str(_THIS))
 sys.path.insert(0, str(REPO_ROOT / "project" / "rtl" / "tb" / "lite_bd" / "module_tb"))
 
@@ -529,7 +529,8 @@ def run_single_image(img_path: str, runner, dry_run: bool, precision: str = "int
     parsed = configure_resnet_precision(precision)
     img_rgb = load_image(img_path)
     q_input = preprocess_resnet18(img_rgb, parsed)
-    rb = Path(runs_base) if runs_base is not None else _THIS / "runs" / "e2e" / f"resnet18_{precision}"
+    rb = (Path(runs_base) if runs_base is not None else
+          _THIS.parents[1] / "cached" / "host_e2e" / f"resnet18_{precision}")
 
     # Clear FPGA HBM weight cache and on-chip TILE_IBUF before each run.
     if runner is not None and not dry_run:

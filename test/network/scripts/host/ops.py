@@ -47,7 +47,7 @@ from pathlib import Path
 from typing import Optional
 
 _THIS = Path(__file__).resolve()
-_REPO = _THIS.parents[3]
+_REPO = _THIS.parents[4]
 sys.path.insert(0, str(_THIS.parent))
 sys.path.insert(0, str(_REPO / "project" / "rtl" / "tb" / "lite_bd" / "module_tb"))
 sys.path.insert(0, str(_REPO / "project" / "runtime"))

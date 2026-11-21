@@ -72,6 +72,8 @@
 build/**
 project/build/**
 test/network/output/**
+test/network/.cache/**
+test/network/cached/**
 test/tops/output/**
 test/topsw/output/**
 test/precision/output/**

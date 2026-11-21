@@ -20,6 +20,7 @@ OBUF_WORD_BYTES = 16
 E2E_GOLDEN = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     "..",
+    "..",
     "rtl",
     "vpu",
     "tb",

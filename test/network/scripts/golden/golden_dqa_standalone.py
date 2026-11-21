@@ -9,8 +9,7 @@ holds metadata + small WB vectors only.
 E2E may use --scale 0.1 in golden_e2e_inst.py for faster integration sim.
 
 Usage:
-  python3 tools/golden_dqa_standalone.py
-  python3 test/network/golden/golden_dqa_standalone.py --scale 1.0 --out-dir test/network/output/dqa_standalone
+  python3 test/network/scripts/golden/golden_dqa_standalone.py
 """
 from __future__ import annotations
 
@@ -183,7 +182,8 @@ def main() -> None:
         default=os.path.join(
             os.path.dirname(os.path.abspath(__file__)),
             "..",
-            "output",
+            "..",
+            "cached",
             "dqa_standalone",
         ),
     )

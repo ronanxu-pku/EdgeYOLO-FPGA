@@ -16,8 +16,8 @@ from pathlib import Path
 
 import numpy as np
 
-REPO = Path(__file__).resolve().parents[2]
-UNIT_TB = REPO / "test" / "network" / "host"
+REPO = Path(__file__).resolve().parents[4]
+UNIT_TB = Path(__file__).resolve().parents[1] / "host"
 GMT = REPO / "project" / "rtl" / "tb" / "lite_bd" / "module_tb"
 LOWERING = REPO / "project" / "compiler" / "lowering"
 for p in (UNIT_TB, GMT, LOWERING):

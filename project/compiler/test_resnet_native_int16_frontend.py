@@ -14,7 +14,7 @@ from onnx import TensorProto, helper, numpy_helper
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "project"))
 sys.path.insert(0, str(REPO / "project" / "compiler" / "frontend"))
-sys.path.insert(0, str(REPO / "test" / "network" / "host"))
+sys.path.insert(0, str(REPO / "test" / "network" / "scripts" / "host"))
 
 from compiler.model_contract import validate_model_precision  # noqa: E402
 from parse_resnet18_qdq import parse_resnet18_qdq, save  # noqa: E402

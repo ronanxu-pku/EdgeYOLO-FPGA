@@ -16,7 +16,7 @@ from pathlib import Path
 import numpy as np
 
 REPO = Path(__file__).resolve().parents[2]
-UNIT_TB = REPO / "test" / "network" / "host"
+UNIT_TB = REPO / "test" / "network" / "scripts" / "host"
 if str(REPO / "project" / "runtime") not in sys.path:
     sys.path.insert(0, str(REPO / "project" / "runtime"))
 if str(UNIT_TB) not in sys.path:
