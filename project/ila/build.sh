@@ -11,5 +11,7 @@ export VIVADO="${VIVADO:-/home/EDAtools/Xilinx/Vivado/2024.2/bin/vivado}"
 export SYNTH_JOBS="$(nproc)" VIVADO_THREADS=32 PLACE_THREADS=32 ROUTE_THREADS=32
 export IMPL_ROUTE_TOP_K=4
 export DCIM_PRECISION_ILA=0
-if [[ "@PROFILE@" == precision ]]; then export DCIM_PRECISION_ILA=1; fi
+if [[ "@PROFILE@" == precision || "@PROFILE@" == combined ]]; then
+    export DCIM_PRECISION_ILA=1
+fi
 "$VIVADO" -mode batch -source scripts/chip-lite/run.tcl -log vivado.log -journal vivado.jou

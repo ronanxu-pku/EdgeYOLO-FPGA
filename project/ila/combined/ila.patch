@@ -1,0 +1,659 @@
+diff --git a/rtl/chip/DCIM_Array.sv b/rtl/chip/DCIM_Array.sv
+--- a/rtl/chip/DCIM_Array.sv
++++ b/rtl/chip/DCIM_Array.sv
+@@ -18,6 +18,7 @@
+     parameter BUF_DATA_WIDTH       = `DCIM_BUF_DATA_WIDTH,
+     parameter TILE_IBUF_ADDR_WIDTH = `DCIM_TILE_IBUF_ADDR_WIDTH,
+     parameter TILE_OBUF_ADDR_WIDTH = `DCIM_TILE_OBUF_ADDR_WIDTH,
++    parameter PRECISION_DEBUG      = 0,
+ 
+     localparam ACC_UBD_WD = $clog2(ACC + 1),
+     localparam STRB_WIDTH = BUF_DATA_WIDTH / 8,
+@@ -59,8 +60,14 @@
+     output wire [31:0]                       peak_dcim_input,
+     output wire [PEAK_JOB_W-1:0]             peak_job,
+     output wire [1:0]                        peak_phase,
++    output wire [2:0]                        peak_pipeline_fire,
++    output wire [2:0]                        peak_pipeline_stall,
+     output wire                              peak_result_valid,
+-    output wire [31:0]                       peak_result_data
++    output wire [31:0]                       peak_result_data,
++    output wire [NUM_TILES-1:0]              peak_ma_fire_mask,
++    output wire [NUM_TILES-1:0]              peak_result_valid_mask,
++    output wire [NUM_TILES*32-1:0]           peak_tile_result_ch0,
++    output wire [272:0]                      precision_probe
+ );
+ 
+     wire [NUM_TILES-1:0] tile_done;
+@@ -148,16 +155,26 @@
+             wire [31:0] t_peak_dcim_input;
+             wire [PEAK_JOB_W-1:0] t_peak_job;
+             wire [1:0] t_peak_phase;
++            wire [2:0] t_peak_pipeline_fire;
++            wire [2:0] t_peak_pipeline_stall;
+             wire t_peak_result_valid;
+             wire [31:0] t_peak_result_data;
++            wire [272:0] t_precision_probe;
+ 
+             assign peak_compute_mask[tile_i] = t_peak_compute_fire;
++            assign peak_ma_fire_mask[tile_i] = t_peak_pipeline_fire[1];
++            assign peak_result_valid_mask[tile_i] = t_peak_result_valid;
++            assign peak_tile_result_ch0[tile_i*32+:32] =
++                t_peak_result_valid ? t_peak_result_data : 32'b0;
+             if (tile_i == 0) begin : gen_peak_tile0
+                 assign peak_dcim_input = t_peak_dcim_input;
+                 assign peak_job = t_peak_job;
+                 assign peak_phase = t_peak_phase;
++                assign peak_pipeline_fire = t_peak_pipeline_fire;
++                assign peak_pipeline_stall = t_peak_pipeline_stall;
+                 assign peak_result_valid = t_peak_result_valid;
+                 assign peak_result_data = t_peak_result_data;
++                assign precision_probe = t_precision_probe;
+             end
+ 
+             (* keep_hierarchy = "yes" *)
+@@ -167,7 +184,8 @@
+                 .BUF_ADDR_WIDTH(BUF_ADDR_WIDTH),
+                 .BUF_DATA_WIDTH(BUF_DATA_WIDTH), .TILE_IDX(tile_i),
+                 .MULT_DSP_EN(1), .DSP_COL_NUM(TILE_DSP_COL),
+-                .DSP_PARTIAL_SUBCOL(TILE_DSP_PARTIAL)
++                .DSP_PARTIAL_SUBCOL(TILE_DSP_PARTIAL),
++                .PRECISION_DEBUG(PRECISION_DEBUG && (tile_i == 0))
+             ) u_tile (
+                 .clk(clk), .rst_n(rst_n), .start(start_r),
+                 .tile_enable(tile_mask_r[tile_i]),
+@@ -193,8 +211,11 @@
+                 .obuf1_wr_data(t_obuf1_wr_data), .obuf1_wr_strb(t_obuf1_wr_strb),
+                 .peak_compute_fire(t_peak_compute_fire),
+                 .peak_dcim_input(t_peak_dcim_input), .peak_job(t_peak_job),
+-                .peak_phase(t_peak_phase), .peak_result_valid(t_peak_result_valid),
+-                .peak_result_data(t_peak_result_data)
++                .peak_phase(t_peak_phase),
++                .peak_pipeline_fire(t_peak_pipeline_fire),
++                .peak_pipeline_stall(t_peak_pipeline_stall),
++                .peak_result_valid(t_peak_result_valid),
++                .peak_result_data(t_peak_result_data), .precision_probe(t_precision_probe)
+             );
+ 
+             // Port B is stream 0. Port A is stream 1 while computing and
+diff --git a/rtl/chip/DCIM_Array_bd.v b/rtl/chip/DCIM_Array_bd.v
+--- a/rtl/chip/DCIM_Array_bd.v
++++ b/rtl/chip/DCIM_Array_bd.v
+@@ -20,7 +20,8 @@
+     parameter IBUF_ADDR_WIDTH     = `DCIM_TILE_IBUF_ADDR_WIDTH,
+     parameter TILE_OBUF_ADDR_WIDTH = `DCIM_TILE_OBUF_ADDR_WIDTH,
+     parameter BUF_DATA_WIDTH      = `DCIM_BUF_DATA_WIDTH,
+-    parameter BUF_ADDR_WIDTH      = IBUF_ADDR_WIDTH
++    parameter BUF_ADDR_WIDTH      = IBUF_ADDR_WIDTH,
++    parameter PRECISION_DEBUG      = 0
+ )(
+     input  wire                          clk,
+     input  wire                          rst_n,
+@@ -131,12 +132,33 @@
+ 
+     // Minimal native probes for the peak-TOPS ILA.  Host-visible interfaces
+     // and all existing address/data mappings remain unchanged.
++    output wire                          peak_clk_toggle,
+     output wire [NUM_TILES-1:0]          peak_compute_mask,
+     output wire [31:0]                   peak_dcim_input,
+     output wire [5:0]                    peak_job,
+     output wire [1:0]                    peak_phase,
++    output wire [2:0]                    peak_pipeline_fire,
++    output wire [2:0]                    peak_pipeline_stall,
+     output wire                          peak_result_valid,
+-    output wire [31:0]                   peak_result_data
++    output wire [31:0]                   peak_result_data,
++    output wire [NUM_TILES-1:0]           peak_ma_fire_mask,
++    output wire [NUM_TILES-1:0]           peak_result_valid_mask,
++    output wire [31:0]                   peak_tile0_result_ch0,
++    output wire [31:0]                   peak_tile1_result_ch0,
++    output wire [31:0]                   peak_tile2_result_ch0,
++    output wire [31:0]                   peak_tile3_result_ch0,
++    output wire [31:0]                   peak_tile4_result_ch0,
++    output wire [31:0]                   peak_tile5_result_ch0,
++    output wire [31:0]                   peak_tile6_result_ch0,
++    output wire [31:0]                   peak_tile7_result_ch0,
++    output wire [4:0]                    prec_stage_valid,
++    output wire [3:0]                    prec_act_slice,
++    output wire [15:0]                   prec_weight_slices,
++    output wire [31:0]                   prec_partial_products,
++    output wire [55:0]                   prec_column_sums,
++    output wire [47:0]                   prec_phase_acc,
++    output wire [63:0]                   prec_result_ch0,
++    output wire [47:0]                   prec_phase_sum
+ );
+ 
+     localparam ADDR_SHIFT = 4;
+@@ -149,11 +171,18 @@
+     // -----------------------------------------------------------------------
+     wire ready_internal;
+     (* shreg_extract = "no", KEEP = "TRUE" *) reg ready_pipe;
++    (* shreg_extract = "no", KEEP = "TRUE" *) reg peak_clk_toggle_r;
+     always @(posedge clk or negedge rst_n) begin
+-        if (!rst_n) ready_pipe <= 1'b1;
+-        else        ready_pipe <= ready_internal;
++        if (!rst_n) begin
++            ready_pipe <= 1'b1;
++            peak_clk_toggle_r <= 1'b0;
++        end else begin
++            ready_pipe <= ready_internal;
++            peak_clk_toggle_r <= ~peak_clk_toggle_r;
++        end
+     end
+     assign ready = ready_pipe;
++    assign peak_clk_toggle = peak_clk_toggle_r;
+ 
+     // -----------------------------------------------------------------------
+     // Configuration registers (unchanged from original)
+@@ -322,7 +351,8 @@
+         .BUF_ADDR_WIDTH  (IBUF_ADDR_WIDTH),
+         .BUF_DATA_WIDTH  (BUF_DATA_WIDTH),
+         .TILE_IBUF_ADDR_WIDTH(IBUF_ADDR_WIDTH),
+-        .TILE_OBUF_ADDR_WIDTH(TILE_OBUF_ADDR_WIDTH)
++        .TILE_OBUF_ADDR_WIDTH(TILE_OBUF_ADDR_WIDTH),
++        .PRECISION_DEBUG(PRECISION_DEBUG)
+     ) u_dcim_array (
+         .clk             (clk),
+         .rst_n           (rst_n),
+@@ -356,8 +386,15 @@
+         .peak_dcim_input           (peak_dcim_input),
+         .peak_job                  (peak_job),
+         .peak_phase                (peak_phase),
++        .peak_pipeline_fire        (peak_pipeline_fire),
++        .peak_pipeline_stall       (peak_pipeline_stall),
+         .peak_result_valid         (peak_result_valid),
+-        .peak_result_data          (peak_result_data)
++        .peak_result_data          (peak_result_data),
++        .peak_ma_fire_mask         (peak_ma_fire_mask),
++        .peak_result_valid_mask    (peak_result_valid_mask),
++        .peak_tile_result_ch0      ({peak_tile7_result_ch0, peak_tile6_result_ch0, peak_tile5_result_ch0, peak_tile4_result_ch0, peak_tile3_result_ch0, peak_tile2_result_ch0, peak_tile1_result_ch0, peak_tile0_result_ch0}),
++        .precision_probe({prec_phase_sum, prec_result_ch0, prec_phase_acc, prec_column_sums, prec_partial_products,
++                          prec_weight_slices, prec_act_slice, prec_stage_valid})
+     );
+ 
+ endmodule
+diff --git a/rtl/chip/DCIM_Tile.sv b/rtl/chip/DCIM_Tile.sv
+--- a/rtl/chip/DCIM_Tile.sv
++++ b/rtl/chip/DCIM_Tile.sv
+@@ -25,6 +25,7 @@
+     parameter MULT_DSP_EN        = 1,
+     parameter DSP_COL_NUM        = CH_OUT/4,
+     parameter DSP_PARTIAL_SUBCOL = 0,
++    parameter PRECISION_DEBUG    = 0,
+ 
+     localparam ACC_W          = $clog2(ACC + 1),
+     localparam STORE_DEPTH    = ACC * CYCLE,
+@@ -81,8 +82,11 @@
+     output wire [31:0]                  peak_dcim_input,
+     output wire [JOB_W-1:0]             peak_job,
+     output wire [1:0]                   peak_phase,
++    output wire [2:0]                   peak_pipeline_fire,
++    output wire [2:0]                   peak_pipeline_stall,
+     output wire                         peak_result_valid,
+-    output wire [31:0]                  peak_result_data
++    output wire [31:0]                  peak_result_data,
++    output wire [272:0]                 precision_probe
+ );
+ 
+     initial begin
+@@ -341,6 +345,10 @@
+     wire core_out_valid;
+     wire core_out_ready;
+     wire [CORE_OUT_WIDTH-1:0] core_out_data;
++    wire precision_mul_valid, precision_acc_valid;
++    wire [8*WD1-1:0] precision_products;
++    wire [2*(WD2+2*WD1+2)-1:0] precision_acc;
++    wire [2*(WD2+2*WD1+2)-1:0] precision_phase_sum;
+ 
+     calculate_core #(
+         .WD1(WD1), .CH_IN(CH_IN), .CH_OUT(CH_OUT),
+@@ -353,7 +361,8 @@
+         .up_valid(phase_valid && cache_weight_valid),
+         .up_ready(phase_ready),
+         .up_data1(phase_data), .up_data2(cache_weight_data),
+-        .dn_valid(ma_valid), .dn_ready(ma_ready), .dn_data(ma_data)
++        .dn_valid(ma_valid), .dn_ready(ma_ready), .dn_data(ma_data),
++        .precision_mul_valid(precision_mul_valid), .precision_products(precision_products)
+     );
+ 
+     postProcess #(
+@@ -363,7 +372,9 @@
+         .mode(mode_reg), .acc('0),
+         .up_valid(ma_valid), .up_ready(ma_ready), .up_data(ma_data),
+         .dn_valid(core_out_valid), .dn_ready(core_out_ready),
+-        .dn_data(core_out_data)
++        .dn_data(core_out_data),
++        .precision_acc_valid(precision_acc_valid), .precision_acc(precision_acc),
++        .precision_phase_sum(precision_phase_sum)
+     );
+ 
+     wire result_row_done;
+@@ -395,6 +406,46 @@
+     assign peak_dcim_input = phase_data[31:0];
+     assign peak_job = phase_job;
+     assign peak_phase = phase_index;
++    // ILA-only handshakes ordered from the front to the back of the arithmetic
++    // pipeline.  These taps do not feed functional control or data paths.
++    assign peak_pipeline_fire[0] = phase_fire;
++    assign peak_pipeline_fire[1] = ma_valid && ma_ready;
++    assign peak_pipeline_fire[2] = core_out_valid && core_out_ready;
++    assign peak_pipeline_stall[0] = phase_valid && !phase_ready;
++    assign peak_pipeline_stall[1] = ma_valid && !ma_ready;
++    assign peak_pipeline_stall[2] = core_out_valid && !core_out_ready;
++
++    generate
++        if (PRECISION_DEBUG) begin : gen_precision_capture
++            wire [15:0] weight_slices = {
++                cache_weight_data[3*CH_IN*WD1+:4], cache_weight_data[2*CH_IN*WD1+:4],
++                cache_weight_data[1*CH_IN*WD1+:4], cache_weight_data[0+:4]
++            };
++            wire [55:0] column_sums = ma_data[0+:4*WD2];
++            wire [31:0] partial_products = precision_products;
++            wire [47:0] phase_acc = precision_acc;
++            wire [47:0] phase_sum = precision_phase_sum;
++            // Sample all stages together so the debug routing has a registered origin.
++            (* keep = "true", shreg_extract = "no" *) reg [272:0] probe;
++            always @(posedge clk) begin
++                // Suppress invalid-cycle payloads at the debug register only.
++                probe <= {
++                    precision_acc_valid ? phase_sum : 48'b0,
++                    peak_result_valid ? obuf0_wr_data[63:0] : 64'b0,
++                    precision_acc_valid ? phase_acc : 48'b0,
++                    (ma_valid && ma_ready) ? column_sums : 56'b0,
++                    precision_mul_valid ? partial_products : 32'b0,
++                    phase_fire ? weight_slices : 16'b0,
++                    phase_fire ? phase_data[3:0] : 4'b0,
++                    peak_result_valid, precision_acc_valid, ma_valid && ma_ready,
++                    precision_mul_valid, phase_fire
++                };
++            end
++            assign precision_probe = probe;
++        end else begin : gen_no_precision_capture
++            assign precision_probe = '0;
++        end
++    endgenerate
+ 
+     // ------------------------------------------------------------------
+     // Compact layer/micro-batch/row scheduler.
+diff --git a/rtl/ref/DCIM/src/dcim/calculate_core.v b/rtl/ref/DCIM/src/dcim/calculate_core.v
+--- a/rtl/ref/DCIM/src/dcim/calculate_core.v
++++ b/rtl/ref/DCIM/src/dcim/calculate_core.v
+@@ -19,7 +19,9 @@
+ 	input  dn_ready,
+ 	input  [CH_IN*WD1-1: 0] 		up_data1,
+ 	input  [CH_OUT*CH_IN*WD1-1: 0]	up_data2,
+-	output [CH_OUT*WD2-1: 0]		dn_data
++	output [CH_OUT*WD2-1: 0]		dn_data,
++	output precision_mul_valid,
++	output [8*WD1-1:0] precision_products
+ );
+ 
+ 	maArray#(.WD1(WD1), .CH_IN(CH_IN), .CH_OUT(CH_OUT), .MULT_DSP_EN(MULT_DSP_EN), .DSP_COL_NUM(DSP_COL_NUM), .DSP_PARTIAL_SUBCOL(DSP_PARTIAL_SUBCOL))
+@@ -28,7 +30,8 @@
+ 			.up_valid(up_valid), .up_ready(up_ready),
+ 			.up_data1(up_data1), .up_data2(up_data2),
+ 			.dn_valid(dn_valid), .dn_ready(dn_ready),
+-			.dn_data(dn_data)
++			.dn_data(dn_data),
++			.precision_mul_valid(precision_mul_valid), .precision_products(precision_products)
+ 		);
+ 
+ endmodule
+diff --git a/rtl/ref/DCIM/src/dcim/maArray.v b/rtl/ref/DCIM/src/dcim/maArray.v
+--- a/rtl/ref/DCIM/src/dcim/maArray.v
++++ b/rtl/ref/DCIM/src/dcim/maArray.v
+@@ -26,7 +26,9 @@
+ 
+ 	input [WD1*CH_IN-1: 0] 			up_data1,
+ 	input [WD1*CH_IN*CH_OUT-1: 0]	up_data2,
+-	output [WD2*CH_OUT-1: 0]		dn_data
++	output [WD2*CH_OUT-1: 0]		dn_data,
++	output precision_mul_valid,
++	output [8*WD1-1:0] precision_products
+ );
+ 
+ 	wire [WD2*CH_OUT-1: 0] w_data_ma;
+@@ -53,6 +55,9 @@
+ 
+ 	wire [MA_PIPE_DEPTH:0] valid_pipe;
+ 	wire [MA_PIPE_DEPTH:0] ready_pipe;
++	wire [8*WD1-1:0] column_products [0:CH_OUT/4-1];
++	assign precision_mul_valid = valid_pipe[2];
++	assign precision_products = column_products[0];
+ 	assign valid_pipe[0] = up_valid;
+ 	assign up_ready = ready_pipe[0];
+ 
+@@ -72,7 +77,8 @@
+ 					.cnt_zero(w_cnt_zero),
+ 					.up_data1(up_data1),
+ 					.up_data2(up_data2[col*4*WD1*CH_IN+: 4*WD1*CH_IN]),
+-					.dn_data(w_data_ma[col*4*WD2+: 4*WD2])
++					.dn_data(w_data_ma[col*4*WD2+: 4*WD2]),
++					.precision_products(column_products[col])
+ 				);
+ 		end
+ 	endgenerate
+@@ -110,7 +116,8 @@
+ 
+ 	input [WD1*CH_IN-1: 0] 		up_data1,
+ 	input [4*WD1*CH_IN-1: 0]	up_data2,
+-	output [4*WD2-1: 0]			dn_data
++	output [4*WD2-1: 0]			dn_data,
++	output [8*WD1-1:0] precision_products
+ 
+ );
+ 	wire w_mode_in_sign;
+@@ -152,7 +159,8 @@
+ 				.data2(up_data2[subcol*WD1*CH_IN+: WD1*CH_IN]),
+ 				.s1(s1),
+ 				.s2(s2[subcol]),
+-				.result(dn_data[subcol*WD2+: WD2])
++				.result(dn_data[subcol*WD2+: WD2]),
++				.precision_product(precision_products[subcol*2*WD1+:2*WD1])
+ 			);
+ 		end
+ 	endgenerate
+@@ -174,10 +182,12 @@
+ 	input [WD1*CH_IN-1: 0] data2,
+ 	input s1,
+ 	input s2,
+-	output reg [WD2-1: 0] result
++	output reg [WD2-1: 0] result,
++	output [2*WD1-1:0] precision_product
+ 
+ );
+ 	wire [2*WD1*CH_IN-1: 0] product;
++	assign precision_product = product[2*WD1-1:0];
+ 	reg s_pipe;
+ 	wire [WD2-1: 0] sum_out;
+ 	genvar ch;
+diff --git a/rtl/ref/DCIM/src/dcim/mergeArray.v b/rtl/ref/DCIM/src/dcim/mergeArray.v
+--- a/rtl/ref/DCIM/src/dcim/mergeArray.v
++++ b/rtl/ref/DCIM/src/dcim/mergeArray.v
+@@ -18,9 +18,18 @@
+ 	input  dn_ready,
+ 	output dn_valid,
+ 	input  [CH_OUT*WD2-1: 0] up_data,
+-	output [CH_OUT*WD2-1: 0] dn_data
++	output [CH_OUT*WD2-1: 0] dn_data,
++	output precision_acc_valid,
++	output [2*(WD2+2*WD1+2)-1:0] precision_acc,
++	output [2*(WD2+2*WD1+2)-1:0] precision_phase_sum
+ );
+ 	wire w_merge_cnt_zero;
++	wire [CH_OUT/4-1:0] acc_valid_by_column;
++	wire [2*(WD2+2*WD1+2)-1:0] acc_by_column [0:CH_OUT/4-1];
++	wire [2*(WD2+2*WD1+2)-1:0] phase_sum_by_column [0:CH_OUT/4-1];
++	assign precision_acc_valid = acc_valid_by_column[0];
++	assign precision_acc = acc_by_column[0];
++	assign precision_phase_sum = phase_sum_by_column[0];
+ 	
+ 	mergeArrayController u_mergeArrayController(
+ 		.clk(clk), .rstn(rstn), .clr(clr), .ena(ena), .mode(mode),
+@@ -37,7 +46,9 @@
+ 				.mode(mode),
+ 				.refresh(w_merge_cnt_zero),
+ 				.up_data(up_data[col*4*WD2+: 4*WD2]),
+-				.dn_data(dn_data[col*4*WD2+: 4*WD2])
++				.dn_data(dn_data[col*4*WD2+: 4*WD2]),
++				.precision_acc_valid(acc_valid_by_column[col]), .precision_acc(acc_by_column[col]),
++				.precision_phase_sum(phase_sum_by_column[col])
+ 			);
+ 		end
+ 	endgenerate
+@@ -60,7 +71,10 @@
+ 	input refresh,
+ 
+ 	input [4*WD2-1: 0] up_data,
+-	output [4*WD2-1: 0] dn_data
++	output [4*WD2-1: 0] dn_data,
++	output precision_acc_valid,
++	output [2*(WD2+2*WD1+2)-1:0] precision_acc,
++	output [2*(WD2+2*WD1+2)-1:0] precision_phase_sum
+ );
+ 	localparam WD_PS1 = WD2 + WD1 + 1;
+ 	localparam PAD_0_WD1 = {(WD1){1'b0}};
+@@ -154,6 +168,11 @@
+ 	reg [WD_TEMP-1: 0] n_tempH, n_tempL;
+ 	reg [2*WD_TEMP-1: 0] n_temp;
+ 	reg [2*WD_TEMP-1: 0] temp;
++	assign precision_acc_valid = ena_d;
++	assign precision_acc = mode == `MODE_INT16 ? n_temp : {{WD_TEMP{n_tempL[WD_TEMP-1]}}, n_tempL};
++	// Tap the registered contribution before the previous activation phase is added.
++	assign precision_phase_sum = mode == `MODE_INT16 ? psum2_s_ext_d
++		: {{WD_TEMP{psum1_s_ext_d[0][WD_TEMP-1]}}, psum1_s_ext_d[0]};
+ 	always@(*) begin
+ 		n_temp = 0;
+ 		temp = {tempH, tempL};
+diff --git a/rtl/ref/DCIM/src/dcim/postProcess.v b/rtl/ref/DCIM/src/dcim/postProcess.v
+--- a/rtl/ref/DCIM/src/dcim/postProcess.v
++++ b/rtl/ref/DCIM/src/dcim/postProcess.v
+@@ -21,7 +21,10 @@
+ 	input  dn_ready,
+ 
+ 	input  [WD2*CH_OUT-1: 0] up_data,
+-	output [WD3*CH_OUT-1: 0] dn_data
++	output [WD3*CH_OUT-1: 0] dn_data,
++	output precision_acc_valid,
++	output [2*(WD2+2*WD1+2)-1:0] precision_acc,
++	output [2*(WD2+2*WD1+2)-1:0] precision_phase_sum
+ 
+ );
+ 	wire merge_valid, merge_ready;
+@@ -31,7 +34,9 @@
+ 		.clk(clk), .rstn(rstn), .clr(clr), .ena(ena),
+ 		.mode(mode),
+ 		.up_valid(up_valid),    .up_ready(up_ready),    .up_data(up_data),
+-		.dn_valid(merge_valid), .dn_ready(merge_ready), .dn_data(merge_data)
++		.dn_valid(merge_valid), .dn_ready(merge_ready), .dn_data(merge_data),
++		.precision_acc_valid(precision_acc_valid), .precision_acc(precision_acc),
++		.precision_phase_sum(precision_phase_sum)
+ 	);
+ 
+ 	// Pipeline register between mergeArray and accumulateArray (替代 MCP 4.1c/d)
+diff --git a/scripts/chip-lite/2_bd.tcl b/scripts/chip-lite/2_bd.tcl
+--- a/scripts/chip-lite/2_bd.tcl
++++ b/scripts/chip-lite/2_bd.tcl
+@@ -123,7 +123,26 @@
+ # ==============================================================================
+ create_bd_cell -type module -reference DCIM_Array_bd dcim_array_0
+ set_property -dict [list CONFIG.NUM_TILES $::DCIM_NUM_TILES] [get_bd_cells dcim_array_0]
++set precisionIla [expr {[info exists ::env(DCIM_PRECISION_ILA)] && $::env(DCIM_PRECISION_ILA) eq "1"}]
++if {$precisionIla} {
++    set_property CONFIG.PRECISION_DEBUG 1 [get_bd_cells dcim_array_0]
++}
+ catch {set_property generate_synth_checkpoint false [get_bd_cells dcim_array_0]}
++
++if {[info exists ::env(DCIM_BD_VALIDATE_ONLY)] && $::env(DCIM_BD_VALIDATE_ONLY) eq "1"} {
++    if {!$precisionIla} { error "Precision BD validation requires DCIM_PRECISION_ILA=1" }
++    source [file normalize "$ipBdDir/precision_ila.tcl"]
++    set validationClock [create_bd_port -dir I -type clk precision_clk]
++    set_property CONFIG.FREQ_HZ 250000000 $validationClock
++    connect_bd_net $validationClock [get_bd_pins dcim_array_0/clk] [get_bd_pins precision_ila/clk]
++    set validationReset [create_bd_port -dir I -type rst precision_resetn]
++    set_property CONFIG.POLARITY ACTIVE_LOW $validationReset
++    connect_bd_net $validationReset [get_bd_pins dcim_array_0/rst_n]
++    validate_bd_design
++    save_bd_design
++    puts "INFO: DCIM_BD_VALIDATE_PASS precision=1"
++    return
++}
+ 
+ create_bd_cell -type module -reference Global_VPU_top vpu_0
+ catch {set_property generate_synth_checkpoint false [get_bd_cells vpu_0]}
+@@ -132,6 +151,10 @@
+ source [file normalize "$ipBdDir/../xdma.tcl"]
+ source [file normalize "$ipBdDir/hbm.tcl"]
+ source [file normalize "$ipBdDir/cdma.tcl"]
++# Combined profile retains TOPS while enabling the Precision observation taps.
++if {$precisionIla} {
++    source [file normalize "$ipBdDir/precision_ila.tcl"]
++}
+ source [file normalize "$ipBdDir/peak_ila.tcl"]
+ source [file normalize "$ipBdDir/connect.tcl"]
+ source [file normalize "$ipBdDir/address.tcl"]
+@@ -198,7 +221,8 @@
+     if {![llength $batch]} { continue }
+     puts "INFO: Launching [llength $batch] OOC run(s)..."
+     reset_run $batch
+-    launch_runs $batch -jobs 32   ;# 每 job 独立 Vivado 进程，32 并发安全
++    set oocJobs [expr {min([llength $batch], $precisionIla ? $synthJobs : 32)}]
++    launch_runs $batch -jobs $oocJobs
+     foreach r $batch {
+         set rname [get_property NAME $r]
+         wait_on_run $r
+diff --git a/scripts/ip/bd/lite/connect.tcl b/scripts/ip/bd/lite/connect.tcl
+--- a/scripts/ip/bd/lite/connect.tcl
++++ b/scripts/ip/bd/lite/connect.tcl
+@@ -234,19 +234,35 @@
+ 
+ # ==============================================================================
+ # Peak-TOPS ILA
+-#   probe0: all-Tile compute fire mask (trigger on 8'hFF)
+-#   probe1: Tile 0 actual DCIM nibble input [31:0]
++#   probe0: DCIM-clock toggle (one transition per ILA sample)
++#   probe1: all-Tile compute fire mask (trigger on 8'hFF)
+ #   probe2: Tile 0 pixel job index (0..63)
+ #   probe3: Tile 0 INT8/INT16 phase index (0..1 / 0..3)
+-#   probe4: Tile 0 final result valid
+-#   probe5: Tile 0 final host-visible result lane [31:0]
+-# ==============================================================================
+-connect_bd_net [get_bd_pins dcim_array_0/peak_compute_mask] [get_bd_pins peak_tops_ila/probe0]
+-connect_bd_net [get_bd_pins dcim_array_0/peak_dcim_input]   [get_bd_pins peak_tops_ila/probe1]
++#   probe4: Tile 0 actual DCIM nibble input [31:0]
++#   probe5: Tile 0 issue/MA/core fire, bit 0 -> bit 2
++#   probe6: Tile 0 issue/MA/core stall, bit 0 -> bit 2
++#   probe7: Tile 0 final result valid
++#   probe8: Tile 0 final host-visible result lane [31:0]
++# ==============================================================================
++connect_bd_net [get_bd_pins dcim_array_0/peak_clk_toggle]   [get_bd_pins peak_tops_ila/probe0]
++connect_bd_net [get_bd_pins dcim_array_0/peak_compute_mask] [get_bd_pins peak_tops_ila/probe1]
+ connect_bd_net [get_bd_pins dcim_array_0/peak_job]          [get_bd_pins peak_tops_ila/probe2]
+ connect_bd_net [get_bd_pins dcim_array_0/peak_phase]        [get_bd_pins peak_tops_ila/probe3]
+-connect_bd_net [get_bd_pins dcim_array_0/peak_result_valid] [get_bd_pins peak_tops_ila/probe4]
+-connect_bd_net [get_bd_pins dcim_array_0/peak_result_data]  [get_bd_pins peak_tops_ila/probe5]
++connect_bd_net [get_bd_pins dcim_array_0/peak_dcim_input]   [get_bd_pins peak_tops_ila/probe4]
++connect_bd_net [get_bd_pins dcim_array_0/peak_pipeline_fire] [get_bd_pins peak_tops_ila/probe5]
++connect_bd_net [get_bd_pins dcim_array_0/peak_pipeline_stall] [get_bd_pins peak_tops_ila/probe6]
++connect_bd_net [get_bd_pins dcim_array_0/peak_result_valid] [get_bd_pins peak_tops_ila/probe7]
++connect_bd_net [get_bd_pins dcim_array_0/peak_result_data]  [get_bd_pins peak_tops_ila/probe8]
++connect_bd_net [get_bd_pins dcim_array_0/peak_ma_fire_mask] [get_bd_pins peak_tops_ila/probe9]
++connect_bd_net [get_bd_pins dcim_array_0/peak_result_valid_mask] [get_bd_pins peak_tops_ila/probe10]
++connect_bd_net [get_bd_pins dcim_array_0/peak_tile0_result_ch0] [get_bd_pins peak_tops_ila/probe11]
++connect_bd_net [get_bd_pins dcim_array_0/peak_tile1_result_ch0] [get_bd_pins peak_tops_ila/probe12]
++connect_bd_net [get_bd_pins dcim_array_0/peak_tile2_result_ch0] [get_bd_pins peak_tops_ila/probe13]
++connect_bd_net [get_bd_pins dcim_array_0/peak_tile3_result_ch0] [get_bd_pins peak_tops_ila/probe14]
++connect_bd_net [get_bd_pins dcim_array_0/peak_tile4_result_ch0] [get_bd_pins peak_tops_ila/probe15]
++connect_bd_net [get_bd_pins dcim_array_0/peak_tile5_result_ch0] [get_bd_pins peak_tops_ila/probe16]
++connect_bd_net [get_bd_pins dcim_array_0/peak_tile6_result_ch0] [get_bd_pins peak_tops_ila/probe17]
++connect_bd_net [get_bd_pins dcim_array_0/peak_tile7_result_ch0] [get_bd_pins peak_tops_ila/probe18]
+ 
+ # ==============================================================================
+ # INST_Decoder <-> VPU_AXI_Regs (vpu_regs)
+@@ -307,6 +323,9 @@
+ connect_bd_net [get_bd_pins xdma_0/axi_aclk] [get_bd_pins dcim_array_0/clk]
+ connect_bd_net [get_bd_pins main_rst/peripheral_aresetn] [get_bd_pins dcim_array_0/rst_n]
+ connect_bd_net [get_bd_pins xdma_0/axi_aclk] [get_bd_pins peak_tops_ila/clk]
++if {$precisionIla} {
++    connect_bd_net [get_bd_pins xdma_0/axi_aclk] [get_bd_pins precision_ila/clk]
++}
+ 
+ # VPU
+ connect_bd_net [get_bd_pins xdma_0/axi_aclk] [get_bd_pins vpu_0/clk]
+diff --git a/scripts/ip/bd/lite/peak_ila.tcl b/scripts/ip/bd/lite/peak_ila.tcl
+--- a/scripts/ip/bd/lite/peak_ila.tcl
++++ b/scripts/ip/bd/lite/peak_ila.tcl
+@@ -4,13 +4,14 @@
+ # Intended workload:
+ #   M=64, K=64, N=128, acc_depth=1, tile_mask=8'hFF, clk=250 MHz
+ #
+-# Evidence:
+-#   probe0 == 8'hFF for 128 consecutive samples (64 jobs at II=2)
++# Evidence, displayed in clock -> input -> pipeline -> result order:
++#   probe0 toggles every 250 MHz DCIM/ILA sample clock.
++#   probe1 == 8'hFF for 128 consecutive samples (64 jobs at II=2)
+ #     => 8 tiles * 64 inputs * 16 INT8 outputs/tile * 2 ops/MAC
+ #        / (2 cycles / 250 MHz) = 2.048 TOPS
+-#   probe1 shows one Tile's real nibble input in those cycles.
+-#   probe2/probe3 identify the pixel job and INT8/INT16 phase.
+-#   probe4/probe5 show one final host-visible result for correctness.
++#   probe2/probe3/probe4 identify the job, phase and real Tile-0 input.
++#   probe5/probe6 expose issue -> MA -> core fire/stall ordering.
++#   probe7/probe8 show one final host-visible result for correctness.
+ #
+ # No host register, address, instruction, IBUF, or OBUF mapping is changed.
+ # ==============================================================================
+@@ -22,17 +23,30 @@
+ create_bd_cell -type ip -vlnv xilinx.com:ip:ila:6.2 peak_tops_ila
+ set_property -dict [list \
+     CONFIG.C_MONITOR_TYPE     {Native} \
+-    CONFIG.C_NUM_OF_PROBES    {6} \
++    CONFIG.C_NUM_OF_PROBES    {19} \
+     CONFIG.C_DATA_DEPTH       {1024} \
+     CONFIG.C_ADV_TRIGGER      {false} \
+     CONFIG.C_EN_STRG_QUAL     {false} \
+     CONFIG.C_INPUT_PIPE_STAGES {1} \
+-    CONFIG.C_PROBE0_WIDTH     $::DCIM_NUM_TILES \
+-    CONFIG.C_PROBE1_WIDTH     {32} \
++    CONFIG.C_PROBE0_WIDTH     {1} \
++    CONFIG.C_PROBE1_WIDTH     $::DCIM_NUM_TILES \
+     CONFIG.C_PROBE2_WIDTH     {6} \
+     CONFIG.C_PROBE3_WIDTH     {2} \
+-    CONFIG.C_PROBE4_WIDTH     {1} \
+-    CONFIG.C_PROBE5_WIDTH     {32} \
++    CONFIG.C_PROBE4_WIDTH     {32} \
++    CONFIG.C_PROBE5_WIDTH     {3} \
++    CONFIG.C_PROBE6_WIDTH     {3} \
++    CONFIG.C_PROBE7_WIDTH     {1} \
++    CONFIG.C_PROBE8_WIDTH     {32} \
++    CONFIG.C_PROBE9_WIDTH     $::DCIM_NUM_TILES \
++    CONFIG.C_PROBE10_WIDTH    $::DCIM_NUM_TILES \
++    CONFIG.C_PROBE11_WIDTH    {32} \
++    CONFIG.C_PROBE12_WIDTH    {32} \
++    CONFIG.C_PROBE13_WIDTH    {32} \
++    CONFIG.C_PROBE14_WIDTH    {32} \
++    CONFIG.C_PROBE15_WIDTH    {32} \
++    CONFIG.C_PROBE16_WIDTH    {32} \
++    CONFIG.C_PROBE17_WIDTH    {32} \
++    CONFIG.C_PROBE18_WIDTH    {32} \
+ ] [get_bd_cells peak_tops_ila]
+ 
+-puts "INFO: peak_tops_ila created: mask+input+job+phase+result_valid+result depth=1024"
++puts "INFO: peak_tops_ila created: clk+issue+pipeline+all-Tile MA/write/results depth=1024"
+diff --git a/scripts/ip/bd/lite/precision_ila.tcl b/scripts/ip/bd/lite/precision_ila.tcl
+new file mode 100644
+--- /dev/null
++++ b/scripts/ip/bd/lite/precision_ila.tcl
+@@ -0,0 +1,32 @@
++# Dedicated Tile 0 precision view. Keep the same probe order for INT8 and INT16.
++set precisionProbes {
++    prec_stage_valid 5
++    prec_act_slice 4
++    prec_weight_slices 16
++    prec_partial_products 32
++    prec_column_sums 56
++    prec_phase_acc 48
++    prec_result_ch0 64
++    prec_phase_sum 48
++}
++create_bd_cell -type ip -vlnv xilinx.com:ip:ila:6.2 precision_ila
++set precisionConfig {
++    CONFIG.C_MONITOR_TYPE Native CONFIG.C_NUM_OF_PROBES 8
++    CONFIG.C_DATA_DEPTH 1024 CONFIG.C_INPUT_PIPE_STAGES 1
++    CONFIG.C_ADV_TRIGGER false CONFIG.C_EN_STRG_QUAL false
++}
++set precisionIdx 0
++foreach {probe width} $precisionProbes {
++    lappend precisionConfig CONFIG.C_PROBE${precisionIdx}_WIDTH $width
++    incr precisionIdx
++}
++set_property -dict $precisionConfig [get_bd_cells precision_ila]
++set precisionIdx 0
++foreach {probe width} $precisionProbes {
++    set pin [get_bd_pins dcim_array_0/$probe]
++    if {1 + [get_property LEFT $pin] - [get_property RIGHT $pin] != $width} {
++        error "Precision probe $probe width differs from $width"
++    }
++    connect_bd_net -net $probe $pin [get_bd_pins precision_ila/probe$precisionIdx]
++    incr precisionIdx
++}

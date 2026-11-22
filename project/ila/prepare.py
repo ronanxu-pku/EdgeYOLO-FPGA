@@ -1,4 +1,4 @@
-"""Prepare an isolated TOPS or Precision build from test-top/project."""
+"""Prepare an isolated TOPS, Precision, or combined ILA build from test-top/project."""
 import argparse
 import difflib
 import hashlib
@@ -90,10 +90,15 @@ def prepare(profile, project, output):
     audit_connections(original[connection].decode("utf-8-sig"),
                       content(output / connection).decode("utf-8-sig"))
     hashes = {name: digest(content(output / name)) for name in sorted(set(original) | touched)}
+    cores = config.get("ila_cores")
+    if cores is None:
+        cores = [{"ila_core": config["ila_core"], "probe_widths": config["probe_widths"]}]
     manifest = {"profile": profile, "source_commit": commit, "source_directory": prefix,
                 "patch_sha256": digest(content(patch)), "files_sha256": hashes,
-                "ila_core": config["ila_core"], "probe_widths": config["probe_widths"],
+                "ila_cores": cores,
                 "board_validation": "pending"}
+    if len(cores) == 1:
+        manifest.update(cores[0])
     (output / "ila_manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     launcher = (HERE / "build.sh").read_text(encoding="utf-8")
     launcher = launcher.replace("@PROFILE@", profile).replace("@COMMIT@", commit)
@@ -105,7 +110,7 @@ def prepare(profile, project, output):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("profile", choices=("tops", "precision"))
+    parser.add_argument("profile", choices=("tops", "precision", "combined"))
     parser.add_argument("--project", type=Path, default=HERE.parent)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()

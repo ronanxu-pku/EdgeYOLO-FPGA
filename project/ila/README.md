@@ -1,13 +1,14 @@
 # TOPS / Precision ILA 补丁
 
-两份补丁均以 `test-top/project` 为基线，分别应用到新的构建目录。每个镜像只有一个 ILA 核；不叠加两份补丁。`prepare.py` 不修改原工程，拒绝覆盖已有输出目录，并校验补丁基线和改动范围。
+三份补丁均以 `test-top/project` 为基线，每次选择一份应用到新的构建目录。TOPS、Precision 独立版各有一个 ILA 核；Combined 合并版同时包含两个核。合并时使用完整的 `combined/ila.patch`，无需手工叠加两份有重叠的补丁。`prepare.py` 不修改原工程，拒绝覆盖已有输出目录，并校验补丁基线和改动范围。
 
 | 配置 | 补丁 | ILA 核 | 物理探针 |
 | --- | --- | --- | --- |
 | TOPS | `tops/ila.patch` | `peak_tops_ila` | 19 个，保留原 9 个，增加 8 Tile 的 MA/写回掩码及每个 Tile 独立的通道 0 结果 |
 | Precision | `precision/ila.patch` | `precision_ila` | 8 个，包含新增的 `prec_phase_sum[47:0]` |
+| Combined | `combined/ila.patch` | `peak_tops_ila` + `precision_ila` | 19 + 8 个，两套探针及顺序与独立版一致 |
 
-原始 `project` 仍带有旧的 6 探针 TOPS 配置。选择上述补丁后，分别得到这里定义的 TOPS 或 Precision 配置。
+原始 `project` 仍带有旧的 6 探针 TOPS 配置。选择上述补丁后，得到对应的独立版或合并版配置。
 
 ## 构建
 
@@ -16,6 +17,7 @@
 ```sh
 python project/ila/prepare.py tops --output ../build-tops-ila
 python project/ila/prepare.py precision --output ../build-precision-ila
+python project/ila/prepare.py combined --output ../build-combined-ila
 ```
 
 在 eda02 的对应构建目录执行：
@@ -26,11 +28,15 @@ nohup bash build_ila.sh > build.log 2>&1 < /dev/null &
 
 默认复用此前 Precision 的 Vivado 2024.2.2、project flow、two-stage 实现策略、32 线程及 4 个路由候选。Vivado 路径可通过 `VIVADO` 环境变量指定。`exit_status` 为退出码；完整结果位于 `build/lite/<profile>_ila_<commit>/ImplOutputDir/`，包括同次生成的 `top.bit`、`top.ltx` 和时序报告。
 
-`ila_manifest.json` 记录源提交、补丁 SHA-256、全部构建源文件 SHA-256 和探针宽度。发布时把它与同次构建的 BIT/LTX 一并保存。`source_commit` 是构建来源，不能用它推断旧镜像的来源。现用的历史镜像另行保留，新的构建结果在上板前标记为 `board_validation: pending`。
+`ila_manifest.json` 记录源提交、补丁 SHA-256、全部构建源文件 SHA-256，以及 `ila_cores` 中每个核的名称和探针宽度。独立版保留原有 `ila_core` / `probe_widths` 字段。发布时把它与同次构建的 BIT/LTX 一并保存。`source_commit` 是构建来源，不能用它推断旧镜像的来源。现用的历史镜像另行保留，新的构建结果在上板前标记为 `board_validation: pending`。
+
+Combined 的两个 ILA 均连接现有 `xdma_0/axi_aclk`，深度均为 1024，输入流水级均为 1。Precision 观测仅在 Tile 0 启用，TOPS 观测覆盖全部 8 Tile。现有 `test/tops/run.py` 和 `test/precision/run.py` 仍按各自的核名称采样，指定合并版对应的同一份 `.ltx` 即可，不需要重新下载另一份位流。两个用例应依次运行，避免同时通过 XDMA 修改同一组工作负载。
+
+合并版已通过 7 个 Precision RTL 用例、启用 Precision 观测的完整 8 Tile TOPS RTL 用例，以及两个核共 27 个探针的模块级 BD 校验。Precision 功能与探针 CSV、TOPS 全 Tile CSV 均与对应独立版逐字节一致；TOPS 的 512 个通道 0 结果和 2,048 个 OBUF 字全部匹配。完整实现及板端状态另见对应构建记录。
 
 ## XDMA 边界
 
-两份补丁仅修改 DCIM 观测输出、ILA 配置和 ILA 连接。XDMA IP 参数、PCIe 时钟/复位、AXI 地址映射、HBM 配置、CDMA/指令译码器和 XDC 约束均保持当前基线内容。准备脚本校验所有未列入补丁的源文件，并拒绝非 ILA 的 BD 连接改动。
+三份补丁仅修改 DCIM 观测输出、ILA 配置和 ILA 连接。XDMA IP 参数、PCIe 时钟/复位、AXI 地址映射、HBM 配置、CDMA/指令译码器和 XDC 约束均保持当前基线内容。准备脚本校验所有未列入补丁的源文件，并拒绝非 ILA 的 BD 连接改动。
 
 此前的部分合并镜像及一份 TOPS 镜像曾在 Windows 出现 XDMA Code 10；具体机制尚未定位。补丁隔离和时序通过都不等于 XDMA 实测通过。新镜像仍需用配对 BIT/LTX 上板，检查 XDMA 正常启动、主机读写及对应的 Precision/TOPS 用例，再记录硬件 PASS。构建脚本不启用强制忽略时序的位流输出。
 
