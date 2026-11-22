@@ -1,16 +1,22 @@
 diff --git a/rtl/chip/DCIM_Array.sv b/rtl/chip/DCIM_Array.sv
 --- a/rtl/chip/DCIM_Array.sv
 +++ b/rtl/chip/DCIM_Array.sv
-@@ -59,6 +59,8 @@
+@@ -59,8 +59,13 @@
      output wire [31:0]                       peak_dcim_input,
      output wire [PEAK_JOB_W-1:0]             peak_job,
      output wire [1:0]                        peak_phase,
 +    output wire [2:0]                        peak_pipeline_fire,
 +    output wire [2:0]                        peak_pipeline_stall,
      output wire                              peak_result_valid,
-     output wire [31:0]                       peak_result_data
+-    output wire [31:0]                       peak_result_data
++    output wire [31:0]                       peak_result_data,
++    output wire [NUM_TILES-1:0]              peak_ma_fire_mask,
++    output wire [NUM_TILES-1:0]              peak_result_valid_mask,
++    output wire [NUM_TILES*32-1:0]           peak_tile_result_ch0
  );
-@@ -148,6 +150,8 @@
+ 
+     wire [NUM_TILES-1:0] tile_done;
+@@ -148,14 +153,22 @@
              wire [31:0] t_peak_dcim_input;
              wire [PEAK_JOB_W-1:0] t_peak_job;
              wire [1:0] t_peak_phase;
@@ -19,7 +25,12 @@ diff --git a/rtl/chip/DCIM_Array.sv b/rtl/chip/DCIM_Array.sv
              wire t_peak_result_valid;
              wire [31:0] t_peak_result_data;
  
-@@ -156,6 +160,8 @@
+             assign peak_compute_mask[tile_i] = t_peak_compute_fire;
++            assign peak_ma_fire_mask[tile_i] = t_peak_pipeline_fire[1];
++            assign peak_result_valid_mask[tile_i] = t_peak_result_valid;
++            assign peak_tile_result_ch0[tile_i*32+:32] =
++                t_peak_result_valid ? t_peak_result_data : 32'b0;
+             if (tile_i == 0) begin : gen_peak_tile0
                  assign peak_dcim_input = t_peak_dcim_input;
                  assign peak_job = t_peak_job;
                  assign peak_phase = t_peak_phase;
@@ -28,7 +39,7 @@ diff --git a/rtl/chip/DCIM_Array.sv b/rtl/chip/DCIM_Array.sv
                  assign peak_result_valid = t_peak_result_valid;
                  assign peak_result_data = t_peak_result_data;
              end
-@@ -193,7 +199,10 @@
+@@ -193,7 +206,10 @@
                  .obuf1_wr_data(t_obuf1_wr_data), .obuf1_wr_strb(t_obuf1_wr_strb),
                  .peak_compute_fire(t_peak_compute_fire),
                  .peak_dcim_input(t_peak_dcim_input), .peak_job(t_peak_job),
@@ -43,7 +54,7 @@ diff --git a/rtl/chip/DCIM_Array.sv b/rtl/chip/DCIM_Array.sv
 diff --git a/rtl/chip/DCIM_Array_bd.v b/rtl/chip/DCIM_Array_bd.v
 --- a/rtl/chip/DCIM_Array_bd.v
 +++ b/rtl/chip/DCIM_Array_bd.v
-@@ -131,10 +131,13 @@
+@@ -131,12 +131,25 @@
  
      // Minimal native probes for the peak-TOPS ILA.  Host-visible interfaces
      // and all existing address/data mappings remain unchanged.
@@ -55,9 +66,22 @@ diff --git a/rtl/chip/DCIM_Array_bd.v b/rtl/chip/DCIM_Array_bd.v
 +    output wire [2:0]                    peak_pipeline_fire,
 +    output wire [2:0]                    peak_pipeline_stall,
      output wire                          peak_result_valid,
-     output wire [31:0]                   peak_result_data
+-    output wire [31:0]                   peak_result_data
++    output wire [31:0]                   peak_result_data,
++    output wire [NUM_TILES-1:0]           peak_ma_fire_mask,
++    output wire [NUM_TILES-1:0]           peak_result_valid_mask,
++    output wire [31:0]                   peak_tile0_result_ch0,
++    output wire [31:0]                   peak_tile1_result_ch0,
++    output wire [31:0]                   peak_tile2_result_ch0,
++    output wire [31:0]                   peak_tile3_result_ch0,
++    output wire [31:0]                   peak_tile4_result_ch0,
++    output wire [31:0]                   peak_tile5_result_ch0,
++    output wire [31:0]                   peak_tile6_result_ch0,
++    output wire [31:0]                   peak_tile7_result_ch0
  );
-@@ -149,11 +152,18 @@
+ 
+     localparam ADDR_SHIFT = 4;
+@@ -149,11 +162,18 @@
      // -----------------------------------------------------------------------
      wire ready_internal;
      (* shreg_extract = "no", KEEP = "TRUE" *) reg ready_pipe;
@@ -78,15 +102,21 @@ diff --git a/rtl/chip/DCIM_Array_bd.v b/rtl/chip/DCIM_Array_bd.v
  
      // -----------------------------------------------------------------------
      // Configuration registers (unchanged from original)
-@@ -356,6 +366,8 @@
+@@ -356,8 +376,13 @@
          .peak_dcim_input           (peak_dcim_input),
          .peak_job                  (peak_job),
          .peak_phase                (peak_phase),
 +        .peak_pipeline_fire        (peak_pipeline_fire),
 +        .peak_pipeline_stall       (peak_pipeline_stall),
          .peak_result_valid         (peak_result_valid),
-         .peak_result_data          (peak_result_data)
+-        .peak_result_data          (peak_result_data)
++        .peak_result_data          (peak_result_data),
++        .peak_ma_fire_mask         (peak_ma_fire_mask),
++        .peak_result_valid_mask    (peak_result_valid_mask),
++        .peak_tile_result_ch0      ({peak_tile7_result_ch0, peak_tile6_result_ch0, peak_tile5_result_ch0, peak_tile4_result_ch0, peak_tile3_result_ch0, peak_tile2_result_ch0, peak_tile1_result_ch0, peak_tile0_result_ch0})
      );
+ 
+ endmodule
 diff --git a/rtl/chip/DCIM_Tile.sv b/rtl/chip/DCIM_Tile.sv
 --- a/rtl/chip/DCIM_Tile.sv
 +++ b/rtl/chip/DCIM_Tile.sv
@@ -117,7 +147,7 @@ diff --git a/rtl/chip/DCIM_Tile.sv b/rtl/chip/DCIM_Tile.sv
 diff --git a/scripts/ip/bd/lite/connect.tcl b/scripts/ip/bd/lite/connect.tcl
 --- a/scripts/ip/bd/lite/connect.tcl
 +++ b/scripts/ip/bd/lite/connect.tcl
-@@ -234,19 +234,25 @@
+@@ -234,19 +234,35 @@
  
  # ==============================================================================
  # Peak-TOPS ILA
@@ -149,6 +179,16 @@ diff --git a/scripts/ip/bd/lite/connect.tcl b/scripts/ip/bd/lite/connect.tcl
 +connect_bd_net [get_bd_pins dcim_array_0/peak_pipeline_stall] [get_bd_pins peak_tops_ila/probe6]
 +connect_bd_net [get_bd_pins dcim_array_0/peak_result_valid] [get_bd_pins peak_tops_ila/probe7]
 +connect_bd_net [get_bd_pins dcim_array_0/peak_result_data]  [get_bd_pins peak_tops_ila/probe8]
++connect_bd_net [get_bd_pins dcim_array_0/peak_ma_fire_mask] [get_bd_pins peak_tops_ila/probe9]
++connect_bd_net [get_bd_pins dcim_array_0/peak_result_valid_mask] [get_bd_pins peak_tops_ila/probe10]
++connect_bd_net [get_bd_pins dcim_array_0/peak_tile0_result_ch0] [get_bd_pins peak_tops_ila/probe11]
++connect_bd_net [get_bd_pins dcim_array_0/peak_tile1_result_ch0] [get_bd_pins peak_tops_ila/probe12]
++connect_bd_net [get_bd_pins dcim_array_0/peak_tile2_result_ch0] [get_bd_pins peak_tops_ila/probe13]
++connect_bd_net [get_bd_pins dcim_array_0/peak_tile3_result_ch0] [get_bd_pins peak_tops_ila/probe14]
++connect_bd_net [get_bd_pins dcim_array_0/peak_tile4_result_ch0] [get_bd_pins peak_tops_ila/probe15]
++connect_bd_net [get_bd_pins dcim_array_0/peak_tile5_result_ch0] [get_bd_pins peak_tops_ila/probe16]
++connect_bd_net [get_bd_pins dcim_array_0/peak_tile6_result_ch0] [get_bd_pins peak_tops_ila/probe17]
++connect_bd_net [get_bd_pins dcim_array_0/peak_tile7_result_ch0] [get_bd_pins peak_tops_ila/probe18]
  
  # ==============================================================================
  # INST_Decoder <-> VPU_AXI_Regs (vpu_regs)
@@ -175,12 +215,12 @@ diff --git a/scripts/ip/bd/lite/peak_ila.tcl b/scripts/ip/bd/lite/peak_ila.tcl
  #
  # No host register, address, instruction, IBUF, or OBUF mapping is changed.
  # ==============================================================================
-@@ -22,17 +23,20 @@
+@@ -22,17 +23,30 @@
  create_bd_cell -type ip -vlnv xilinx.com:ip:ila:6.2 peak_tops_ila
  set_property -dict [list \
      CONFIG.C_MONITOR_TYPE     {Native} \
 -    CONFIG.C_NUM_OF_PROBES    {6} \
-+    CONFIG.C_NUM_OF_PROBES    {9} \
++    CONFIG.C_NUM_OF_PROBES    {19} \
      CONFIG.C_DATA_DEPTH       {1024} \
      CONFIG.C_ADV_TRIGGER      {false} \
      CONFIG.C_EN_STRG_QUAL     {false} \
@@ -198,7 +238,17 @@ diff --git a/scripts/ip/bd/lite/peak_ila.tcl b/scripts/ip/bd/lite/peak_ila.tcl
 +    CONFIG.C_PROBE6_WIDTH     {3} \
 +    CONFIG.C_PROBE7_WIDTH     {1} \
 +    CONFIG.C_PROBE8_WIDTH     {32} \
++    CONFIG.C_PROBE9_WIDTH     $::DCIM_NUM_TILES \
++    CONFIG.C_PROBE10_WIDTH    $::DCIM_NUM_TILES \
++    CONFIG.C_PROBE11_WIDTH    {32} \
++    CONFIG.C_PROBE12_WIDTH    {32} \
++    CONFIG.C_PROBE13_WIDTH    {32} \
++    CONFIG.C_PROBE14_WIDTH    {32} \
++    CONFIG.C_PROBE15_WIDTH    {32} \
++    CONFIG.C_PROBE16_WIDTH    {32} \
++    CONFIG.C_PROBE17_WIDTH    {32} \
++    CONFIG.C_PROBE18_WIDTH    {32} \
  ] [get_bd_cells peak_tops_ila]
  
 -puts "INFO: peak_tops_ila created: mask+input+job+phase+result_valid+result depth=1024"
-+puts "INFO: peak_tops_ila created: clk+mask+job+phase+input+pipeline+result depth=1024"
++puts "INFO: peak_tops_ila created: clk+issue+pipeline+all-Tile MA/write/results depth=1024"

@@ -4,7 +4,7 @@
 
 | 配置 | 补丁 | ILA 核 | 物理探针 |
 | --- | --- | --- | --- |
-| TOPS | `tops/ila.patch` | `peak_tops_ila` | 9 个，包含时钟翻转、8 Tile 发射掩码、job、phase、输入、流水线 fire/stall 和结果 |
+| TOPS | `tops/ila.patch` | `peak_tops_ila` | 19 个，保留原 9 个，增加 8 Tile 的 MA/写回掩码及每个 Tile 独立的通道 0 结果 |
 | Precision | `precision/ila.patch` | `precision_ila` | 8 个，包含新增的 `prec_phase_sum[47:0]` |
 
 原始 `project` 仍带有旧的 6 探针 TOPS 配置。选择上述补丁后，分别得到这里定义的 TOPS 或 Precision 配置。
@@ -33,6 +33,29 @@ nohup bash build_ila.sh > build.log 2>&1 < /dev/null &
 两份补丁仅修改 DCIM 观测输出、ILA 配置和 ILA 连接。XDMA IP 参数、PCIe 时钟/复位、AXI 地址映射、HBM 配置、CDMA/指令译码器和 XDC 约束均保持当前基线内容。准备脚本校验所有未列入补丁的源文件，并拒绝非 ILA 的 BD 连接改动。
 
 此前的部分合并镜像及一份 TOPS 镜像曾在 Windows 出现 XDMA Code 10；具体机制尚未定位。补丁隔离和时序通过都不等于 XDMA 实测通过。新镜像仍需用配对 BIT/LTX 上板，检查 XDMA 正常启动、主机读写及对应的 Precision/TOPS 用例，再记录硬件 PASS。构建脚本不启用强制忽略时序的位流输出。
+
+## TOPS 的 8 Tile 直接证据
+
+原 9 个探针中，`peak_compute_mask[7:0]` 覆盖全部 Tile，其他数据及流水线观测主要来自 Tile 0。新补丁保留 probe0–8，追加：
+
+| 物理探针 | 信号 | 含义 |
+| --- | --- | --- |
+| probe9 | `peak_ma_fire_mask[7:0]` | 每一位来自对应 Tile 的真实 `ma_valid && ma_ready` |
+| probe10 | `peak_result_valid_mask[7:0]` | 每一位来自对应 Tile 的真实 `writer_accept` |
+| probe11–18 | `peak_tile0_result_ch0` 至 `peak_tile7_result_ch0` | 各 Tile 独立的 32 位通道 0 写回值；无效拍归零 |
+
+按当前 seed=123、M=64/K=64/N=128 的用例，8 Tile 完整 RTL 仿真得到以下预期位置。第一拍输入对齐到 ILA 样本 32，尚不代表新镜像已完成上板采样。
+
+| 信号 | 预期采样 |
+| --- | --- |
+| `peak_compute_mask` | 样本 32–159 连续 128 拍为 `FF` |
+| `peak_ma_fire_mask` | 样本 42–169 连续 128 拍为 `FF` |
+| `peak_result_valid_mask` | 样本 48、50、…、174 为 `FF`，共 64 组写回 |
+| Tile 0–7 首组通道 0 结果 | `00001778`、`000004AD`、`FFFFF798`、`000006D3`、`000007DB`、`FFFFFD1D`、`FFFFFD36`、`00000676` |
+
+`test/tops/run.py` 自动识别新探针，显示上述三个掩码、job/phase 和 8 行独立结果。校验器将各 Tile 的 64 个通道 0 结果逐个与 golden 对比（合计 512 个），并继续要求主机回读的 2,048 个 128 位结果字全部匹配。旧的 6/9 探针镜像仍按原方式校验，不会声称已经观测了新探针。
+
+完整 Array 仿真已检查 128 次全 Tile 输入、128 次全 Tile MA 接受、64 次全 Tile 写回、512 个通道 0 结果和 2,048 个 OBUF 字；均通过。采样校验器也已验证能拒绝缺失一个 Tile 的 MA 有效位及单个 Tile 的错误结果。
 
 ## Precision INT8 显示
 

@@ -25,6 +25,14 @@ BOARDREF_STAGES = (
     ("peak_compute_mask", "peak_job", "peak_phase", "peak_dcim_input"),
     ("peak_result_valid", "peak_result_data"),
 )
+TILE_RESULTS = tuple(f"peak_tile{tile}_result_ch0" for tile in range(8))
+ALL_TILE_PROBES = {
+    "peak_ma_fire_mask": 8, "peak_result_valid_mask": 8,
+    **{name: 32 for name in TILE_RESULTS},
+}
+ALL_TILE_STAGES = (("peak_ma_fire_mask",), ("peak_result_valid_mask", *TILE_RESULTS))
+ALL_TILE_VIEW = ("peak_compute_mask", "peak_ma_fire_mask", "peak_result_valid_mask",
+                 "peak_job", "peak_phase", *TILE_RESULTS)
 JOB_COUNT = 64
 PHASE_COUNT = 2 * JOB_COUNT
 RESULT_WORDS = JOB_COUNT * 8 * 4
@@ -42,6 +50,9 @@ def read_events(path: Path):
             raise ValueError("TOPS probe names are missing from the Vivado CSV")
         boardref = "peak_compute_mask" in names
         probes, stages = (BOARDREF_PROBES, BOARDREF_STAGES) if boardref else (PROBES, STAGES)
+        if boardref and any(name in names for name in ALL_TILE_PROBES):
+            probes = {**BOARDREF_PROBES, **ALL_TILE_PROBES}
+            stages = BOARDREF_STAGES + ALL_TILE_STAGES
         events = [[] for _ in stages]
         for name in probes:
             if names.count(name) != 1:
@@ -113,6 +124,36 @@ def verify_boardref(issues, writes, folder: Path) -> dict:
     }
 
 
+def verify_all_tiles(issues, tile0_writes, columns, writes, folder: Path) -> dict:
+    if (len(columns), len(writes)) != (PHASE_COUNT, JOB_COUNT):
+        raise ValueError("Expected 128 all-Tile MA events and 64 all-Tile writes")
+    ma_start = columns[0][0]
+    if not issues[0][0] < ma_start < writes[0][0] < issues[-1][0] + 1:
+        raise ValueError("All-Tile issue, MA and write stages did not overlap")
+    if [sample for (sample,) in columns] != list(range(ma_start, ma_start + PHASE_COUNT)):
+        raise ValueError("All-Tile MA events are not continuous")
+    with np.load(folder / "operands.npz") as inputs:
+        golden = inputs["golden"].astype(np.int64)
+    if golden.shape != (JOB_COUNT, 128):
+        raise ValueError(f"Unexpected all-Tile golden shape: {golden.shape}")
+    for job, (sample, *values) in enumerate(writes):
+        if sample != tile0_writes[job][0] or sample <= columns[2 * job + 1][0]:
+            raise ValueError(f"Wrong all-Tile write timing at job {job}")
+        for tile, value in enumerate(values):
+            expected = int(golden[job, tile * 16]) & 0xffffffff
+            if value != expected:
+                raise ValueError(f"Tile {tile} channel 0 mismatch at job {job}: "
+                                 f"0x{value:08X} != 0x{expected:08X}")
+    return {
+        "probe_layout": "all_tiles", "ma_active_tile_mask": "0xFF",
+        "write_active_tile_mask": "0xFF", "ma_sample_start": ma_start,
+        "ma_cycles": len(columns), "write_batch_count": len(writes),
+        "tiles_checked": 8, "per_tile_ch0_results_checked": JOB_COUNT,
+        "all_tile_ch0_results_checked": 8 * JOB_COUNT,
+        "first_tile_results_hex": [f"0x{value:08X}" for value in writes[0][1:]],
+    }
+
+
 def verify_peak(folder: Path, host_report: dict) -> dict:
     checks = host_report.get("host_results", [])
     if (host_report.get("host_correctness_pass") is not True or
@@ -123,7 +164,10 @@ def verify_peak(folder: Path, host_report: dict) -> dict:
 
     boardref, events = read_events(folder / "peak_int8.csv")
     if boardref:
-        return verify_boardref(*events, folder)
+        result = verify_boardref(*events[:2], folder)
+        if len(events) == 4:
+            result.update(verify_all_tiles(*events, folder))
+        return result
     issues, columns, writes = events
     counts = (len(issues), len(columns), len(writes))
     if counts != (PHASE_COUNT, PHASE_COUNT, JOB_COUNT):

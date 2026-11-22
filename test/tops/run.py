@@ -347,7 +347,7 @@ class PowerSampler:
 
 
 def open_peak_waveform(vivado: str, path: Path) -> int:
-    from fpga.verify_peak import BOARDREF_PROBES, PROBES
+    from fpga.verify_peak import ALL_TILE_VIEW, BOARDREF_PROBES, PROBES
 
     if path.is_dir():
         path = path / "peak_int8.ila"
@@ -359,7 +359,8 @@ def open_peak_waveform(vivado: str, path: Path) -> int:
     probes = tuple(PROBES)
     if b"peak_compute_mask" in config:
         prefix = "dcim_array_0_" if b"dcim_array_0_peak_compute_mask" in config else ""
-        probes = tuple(prefix + name for name in BOARDREF_PROBES)
+        names = ALL_TILE_VIEW if b"peak_tile7_result_ch0" in config else BOARDREF_PROBES
+        probes = tuple(prefix + name for name in names)
     last_sample = 185
     report_path = path.with_name("fpga_peak_report.json")
     if report_path.is_file():
