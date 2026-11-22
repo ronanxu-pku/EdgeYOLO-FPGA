@@ -1,0 +1,204 @@
+diff --git a/rtl/chip/DCIM_Array.sv b/rtl/chip/DCIM_Array.sv
+--- a/rtl/chip/DCIM_Array.sv
++++ b/rtl/chip/DCIM_Array.sv
+@@ -59,6 +59,8 @@
+     output wire [31:0]                       peak_dcim_input,
+     output wire [PEAK_JOB_W-1:0]             peak_job,
+     output wire [1:0]                        peak_phase,
++    output wire [2:0]                        peak_pipeline_fire,
++    output wire [2:0]                        peak_pipeline_stall,
+     output wire                              peak_result_valid,
+     output wire [31:0]                       peak_result_data
+ );
+@@ -148,6 +150,8 @@
+             wire [31:0] t_peak_dcim_input;
+             wire [PEAK_JOB_W-1:0] t_peak_job;
+             wire [1:0] t_peak_phase;
++            wire [2:0] t_peak_pipeline_fire;
++            wire [2:0] t_peak_pipeline_stall;
+             wire t_peak_result_valid;
+             wire [31:0] t_peak_result_data;
+ 
+@@ -156,6 +160,8 @@
+                 assign peak_dcim_input = t_peak_dcim_input;
+                 assign peak_job = t_peak_job;
+                 assign peak_phase = t_peak_phase;
++                assign peak_pipeline_fire = t_peak_pipeline_fire;
++                assign peak_pipeline_stall = t_peak_pipeline_stall;
+                 assign peak_result_valid = t_peak_result_valid;
+                 assign peak_result_data = t_peak_result_data;
+             end
+@@ -193,7 +199,10 @@
+                 .obuf1_wr_data(t_obuf1_wr_data), .obuf1_wr_strb(t_obuf1_wr_strb),
+                 .peak_compute_fire(t_peak_compute_fire),
+                 .peak_dcim_input(t_peak_dcim_input), .peak_job(t_peak_job),
+-                .peak_phase(t_peak_phase), .peak_result_valid(t_peak_result_valid),
++                .peak_phase(t_peak_phase),
++                .peak_pipeline_fire(t_peak_pipeline_fire),
++                .peak_pipeline_stall(t_peak_pipeline_stall),
++                .peak_result_valid(t_peak_result_valid),
+                 .peak_result_data(t_peak_result_data)
+             );
+ 
+diff --git a/rtl/chip/DCIM_Array_bd.v b/rtl/chip/DCIM_Array_bd.v
+--- a/rtl/chip/DCIM_Array_bd.v
++++ b/rtl/chip/DCIM_Array_bd.v
+@@ -131,10 +131,13 @@
+ 
+     // Minimal native probes for the peak-TOPS ILA.  Host-visible interfaces
+     // and all existing address/data mappings remain unchanged.
++    output wire                          peak_clk_toggle,
+     output wire [NUM_TILES-1:0]          peak_compute_mask,
+     output wire [31:0]                   peak_dcim_input,
+     output wire [5:0]                    peak_job,
+     output wire [1:0]                    peak_phase,
++    output wire [2:0]                    peak_pipeline_fire,
++    output wire [2:0]                    peak_pipeline_stall,
+     output wire                          peak_result_valid,
+     output wire [31:0]                   peak_result_data
+ );
+@@ -149,11 +152,18 @@
+     // -----------------------------------------------------------------------
+     wire ready_internal;
+     (* shreg_extract = "no", KEEP = "TRUE" *) reg ready_pipe;
++    (* shreg_extract = "no", KEEP = "TRUE" *) reg peak_clk_toggle_r;
+     always @(posedge clk or negedge rst_n) begin
+-        if (!rst_n) ready_pipe <= 1'b1;
+-        else        ready_pipe <= ready_internal;
++        if (!rst_n) begin
++            ready_pipe <= 1'b1;
++            peak_clk_toggle_r <= 1'b0;
++        end else begin
++            ready_pipe <= ready_internal;
++            peak_clk_toggle_r <= ~peak_clk_toggle_r;
++        end
+     end
+     assign ready = ready_pipe;
++    assign peak_clk_toggle = peak_clk_toggle_r;
+ 
+     // -----------------------------------------------------------------------
+     // Configuration registers (unchanged from original)
+@@ -356,6 +366,8 @@
+         .peak_dcim_input           (peak_dcim_input),
+         .peak_job                  (peak_job),
+         .peak_phase                (peak_phase),
++        .peak_pipeline_fire        (peak_pipeline_fire),
++        .peak_pipeline_stall       (peak_pipeline_stall),
+         .peak_result_valid         (peak_result_valid),
+         .peak_result_data          (peak_result_data)
+     );
+diff --git a/rtl/chip/DCIM_Tile.sv b/rtl/chip/DCIM_Tile.sv
+--- a/rtl/chip/DCIM_Tile.sv
++++ b/rtl/chip/DCIM_Tile.sv
+@@ -81,6 +81,8 @@
+     output wire [31:0]                  peak_dcim_input,
+     output wire [JOB_W-1:0]             peak_job,
+     output wire [1:0]                   peak_phase,
++    output wire [2:0]                   peak_pipeline_fire,
++    output wire [2:0]                   peak_pipeline_stall,
+     output wire                         peak_result_valid,
+     output wire [31:0]                  peak_result_data
+ );
+@@ -395,6 +397,14 @@
+     assign peak_dcim_input = phase_data[31:0];
+     assign peak_job = phase_job;
+     assign peak_phase = phase_index;
++    // ILA-only handshakes ordered from the front to the back of the arithmetic
++    // pipeline.  These taps do not feed functional control or data paths.
++    assign peak_pipeline_fire[0] = phase_fire;
++    assign peak_pipeline_fire[1] = ma_valid && ma_ready;
++    assign peak_pipeline_fire[2] = core_out_valid && core_out_ready;
++    assign peak_pipeline_stall[0] = phase_valid && !phase_ready;
++    assign peak_pipeline_stall[1] = ma_valid && !ma_ready;
++    assign peak_pipeline_stall[2] = core_out_valid && !core_out_ready;
+ 
+     // ------------------------------------------------------------------
+     // Compact layer/micro-batch/row scheduler.
+diff --git a/scripts/ip/bd/lite/connect.tcl b/scripts/ip/bd/lite/connect.tcl
+--- a/scripts/ip/bd/lite/connect.tcl
++++ b/scripts/ip/bd/lite/connect.tcl
+@@ -234,19 +234,25 @@
+ 
+ # ==============================================================================
+ # Peak-TOPS ILA
+-#   probe0: all-Tile compute fire mask (trigger on 8'hFF)
+-#   probe1: Tile 0 actual DCIM nibble input [31:0]
++#   probe0: DCIM-clock toggle (one transition per ILA sample)
++#   probe1: all-Tile compute fire mask (trigger on 8'hFF)
+ #   probe2: Tile 0 pixel job index (0..63)
+ #   probe3: Tile 0 INT8/INT16 phase index (0..1 / 0..3)
+-#   probe4: Tile 0 final result valid
+-#   probe5: Tile 0 final host-visible result lane [31:0]
+-# ==============================================================================
+-connect_bd_net [get_bd_pins dcim_array_0/peak_compute_mask] [get_bd_pins peak_tops_ila/probe0]
+-connect_bd_net [get_bd_pins dcim_array_0/peak_dcim_input]   [get_bd_pins peak_tops_ila/probe1]
++#   probe4: Tile 0 actual DCIM nibble input [31:0]
++#   probe5: Tile 0 issue/MA/core fire, bit 0 -> bit 2
++#   probe6: Tile 0 issue/MA/core stall, bit 0 -> bit 2
++#   probe7: Tile 0 final result valid
++#   probe8: Tile 0 final host-visible result lane [31:0]
++# ==============================================================================
++connect_bd_net [get_bd_pins dcim_array_0/peak_clk_toggle]   [get_bd_pins peak_tops_ila/probe0]
++connect_bd_net [get_bd_pins dcim_array_0/peak_compute_mask] [get_bd_pins peak_tops_ila/probe1]
+ connect_bd_net [get_bd_pins dcim_array_0/peak_job]          [get_bd_pins peak_tops_ila/probe2]
+ connect_bd_net [get_bd_pins dcim_array_0/peak_phase]        [get_bd_pins peak_tops_ila/probe3]
+-connect_bd_net [get_bd_pins dcim_array_0/peak_result_valid] [get_bd_pins peak_tops_ila/probe4]
+-connect_bd_net [get_bd_pins dcim_array_0/peak_result_data]  [get_bd_pins peak_tops_ila/probe5]
++connect_bd_net [get_bd_pins dcim_array_0/peak_dcim_input]   [get_bd_pins peak_tops_ila/probe4]
++connect_bd_net [get_bd_pins dcim_array_0/peak_pipeline_fire] [get_bd_pins peak_tops_ila/probe5]
++connect_bd_net [get_bd_pins dcim_array_0/peak_pipeline_stall] [get_bd_pins peak_tops_ila/probe6]
++connect_bd_net [get_bd_pins dcim_array_0/peak_result_valid] [get_bd_pins peak_tops_ila/probe7]
++connect_bd_net [get_bd_pins dcim_array_0/peak_result_data]  [get_bd_pins peak_tops_ila/probe8]
+ 
+ # ==============================================================================
+ # INST_Decoder <-> VPU_AXI_Regs (vpu_regs)
+diff --git a/scripts/ip/bd/lite/peak_ila.tcl b/scripts/ip/bd/lite/peak_ila.tcl
+--- a/scripts/ip/bd/lite/peak_ila.tcl
++++ b/scripts/ip/bd/lite/peak_ila.tcl
+@@ -4,13 +4,14 @@
+ # Intended workload:
+ #   M=64, K=64, N=128, acc_depth=1, tile_mask=8'hFF, clk=250 MHz
+ #
+-# Evidence:
+-#   probe0 == 8'hFF for 128 consecutive samples (64 jobs at II=2)
++# Evidence, displayed in clock -> input -> pipeline -> result order:
++#   probe0 toggles every 250 MHz DCIM/ILA sample clock.
++#   probe1 == 8'hFF for 128 consecutive samples (64 jobs at II=2)
+ #     => 8 tiles * 64 inputs * 16 INT8 outputs/tile * 2 ops/MAC
+ #        / (2 cycles / 250 MHz) = 2.048 TOPS
+-#   probe1 shows one Tile's real nibble input in those cycles.
+-#   probe2/probe3 identify the pixel job and INT8/INT16 phase.
+-#   probe4/probe5 show one final host-visible result for correctness.
++#   probe2/probe3/probe4 identify the job, phase and real Tile-0 input.
++#   probe5/probe6 expose issue -> MA -> core fire/stall ordering.
++#   probe7/probe8 show one final host-visible result for correctness.
+ #
+ # No host register, address, instruction, IBUF, or OBUF mapping is changed.
+ # ==============================================================================
+@@ -22,17 +23,20 @@
+ create_bd_cell -type ip -vlnv xilinx.com:ip:ila:6.2 peak_tops_ila
+ set_property -dict [list \
+     CONFIG.C_MONITOR_TYPE     {Native} \
+-    CONFIG.C_NUM_OF_PROBES    {6} \
++    CONFIG.C_NUM_OF_PROBES    {9} \
+     CONFIG.C_DATA_DEPTH       {1024} \
+     CONFIG.C_ADV_TRIGGER      {false} \
+     CONFIG.C_EN_STRG_QUAL     {false} \
+     CONFIG.C_INPUT_PIPE_STAGES {1} \
+-    CONFIG.C_PROBE0_WIDTH     $::DCIM_NUM_TILES \
+-    CONFIG.C_PROBE1_WIDTH     {32} \
++    CONFIG.C_PROBE0_WIDTH     {1} \
++    CONFIG.C_PROBE1_WIDTH     $::DCIM_NUM_TILES \
+     CONFIG.C_PROBE2_WIDTH     {6} \
+     CONFIG.C_PROBE3_WIDTH     {2} \
+-    CONFIG.C_PROBE4_WIDTH     {1} \
+-    CONFIG.C_PROBE5_WIDTH     {32} \
++    CONFIG.C_PROBE4_WIDTH     {32} \
++    CONFIG.C_PROBE5_WIDTH     {3} \
++    CONFIG.C_PROBE6_WIDTH     {3} \
++    CONFIG.C_PROBE7_WIDTH     {1} \
++    CONFIG.C_PROBE8_WIDTH     {32} \
+ ] [get_bd_cells peak_tops_ila]
+ 
+-puts "INFO: peak_tops_ila created: mask+input+job+phase+result_valid+result depth=1024"
++puts "INFO: peak_tops_ila created: clk+mask+job+phase+input+pipeline+result depth=1024"

@@ -1,0 +1,25 @@
+{
+  "ila_core": "precision_ila",
+  "probe_widths": [
+    5,
+    4,
+    16,
+    32,
+    56,
+    48,
+    64,
+    48
+  ],
+  "base_sha256": {
+    "rtl/chip/DCIM_Array.sv": "722ba5b5a3a63b54afc08a175c6e6e723b6e170510ba332a361bcdde7bd8a200",
+    "rtl/chip/DCIM_Array_bd.v": "998d628f063dbc0d50b3035b2100ce6ae294a94aa9df13c3abb139d158467b5f",
+    "rtl/chip/DCIM_Tile.sv": "096fa28e1772cda3e904f01b1f69ac1f9d0c5d8c4480ee46b90639aec66efa11",
+    "rtl/ref/DCIM/src/dcim/calculate_core.v": "865b5fb21433b4192c6818b8b23f67d119b76555d49b6e6e34c931cb8892f5ae",
+    "rtl/ref/DCIM/src/dcim/maArray.v": "9ae33011d631e1463e93b183ede86e4e167ce826fd3b5bdd17df1231acd33df1",
+    "rtl/ref/DCIM/src/dcim/mergeArray.v": "ed83d716a7b7fa7b984361366ca3a37f1911faabd8e438f5ec40340fdc90f44f",
+    "rtl/ref/DCIM/src/dcim/postProcess.v": "50c99010eb8e9ed5278bb3053d22375ed6075537f3763aa725fc9f061f684b5a",
+    "scripts/chip-lite/2_bd.tcl": "e1c5e1d581d513fa162e2f788a02df1caf87bb638f197d4e2960f3493e81eecf",
+    "scripts/ip/bd/lite/connect.tcl": "224c2e55333f6b9a21cbfec16e1cdbc54f4a51765894bfb7158d023a4516030d",
+    "scripts/ip/bd/lite/precision_ila.tcl": null
+  }
+}
