@@ -1,4 +1,4 @@
-# Use with the six-probe top_tops_boardref BIT/LTX in Vivado Hardware Manager.
+# Use with peak_tops_ila in bitstream/top.bit and its matching bitstream/top.ltx.
 proc dcim_boardref_core {} {
     set ila [get_hw_ilas -of_objects [current_hw_device] -filter {CELL_NAME =~ "*/peak_tops_ila"}]
     if {[llength $ila] != 1} {
@@ -16,7 +16,7 @@ proc dcim_boardref_arm {} {
     foreach {signal compare} {peak_compute_mask eq8'hFF peak_job eq6'h00 peak_phase eq2'h0} {
         set probes [get_hw_probes -of_objects $ila -filter [format {NAME =~ "*%s*"} $signal]]
         if {[llength $probes] != 1} {
-            error "Expected one $signal probe. Load top_tops_boardref.ltx."
+            error "Expected one $signal probe. Load top.ltx."
         }
         set_property TRIGGER_COMPARE_VALUE $compare [lindex $probes 0]
     }

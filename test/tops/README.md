@@ -1,7 +1,7 @@
 # FPGA 实机 INT8 峰值算力
 
 在接有 VCU128 的 Windows 主机，用 Vivado Lab 烧录
-`bitstream/top_network_tops.bit` 并加载 `bitstream/top_network_tops.ltx`。这对文件也用于 Network 测试。
+`bitstream/top.bit` 并加载 `bitstream/top.ltx`。这对 Combined 文件也用于 Network 和 Precision 测试。
 确认 XDMA 正常，再关闭占用 JTAG 的在线 Hardware Manager 会话。从仓库根目录运行：
 
 ```powershell

@@ -3,7 +3,7 @@
 HBM 近存 AI 处理器的 FPGA 验证工程。顶层只保留源码、测试，以及烧录文件。
 
 ```text
-bitstream/            Network/TOPS 和 Precision 的配对烧录文件与 ILA 探针
+bitstream/            Network / TOPS / Precision 共用的 Combined 烧录文件与 ILA 探针
 project/              RTL、编译器、运行时、模型、Vivado 脚本
 test/network/         网络执行与量化一致性
 test/tops/            峰值算力
@@ -12,8 +12,7 @@ test/topsw/           峰值能效（占位）
 
 | 测试 | FPGA 烧录文件 | ILA 探针文件 |
 | --- | --- | --- |
-| Network / TOPS | [top_network_tops.bit](bitstream/top_network_tops.bit) | [top_network_tops.ltx](bitstream/top_network_tops.ltx) |
-| Precision | [top_precision.bit](bitstream/top_precision.bit) | [top_precision.ltx](bitstream/top_precision.ltx) |
+| Network / TOPS / Precision | [top.bit](bitstream/top.bit) | [top.ltx](bitstream/top.ltx) |
 
 测试命令、产物目录、判定标准和本次实测见 [`test/TESTING.md`](test/TESTING.md)。每组测试的产物写在自己的 `output/` 里。
 

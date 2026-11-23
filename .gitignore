@@ -103,10 +103,8 @@ logs/**
 /bd/
 
 # Shipped FPGA programming pairs.
-!/bitstream/top_network_tops.bit
-!/bitstream/top_network_tops.ltx
-!/bitstream/top_precision.bit
-!/bitstream/top_precision.ltx
+!/bitstream/top.bit
+!/bitstream/top.ltx
 
 # Downloaded / extra model packages
 weihgts/

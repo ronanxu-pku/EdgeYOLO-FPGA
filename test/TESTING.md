@@ -2,8 +2,8 @@
 
 ## 配对烧录文件
 
-- Network 和 TOPS 共用 [top_network_tops.bit](../bitstream/top_network_tops.bit) 和 [top_network_tops.ltx](../bitstream/top_network_tops.ltx)。这对文件来自 `ca47abbe` 的 `top.bit` / `top.ltx`。实测两项时可保持同一份镜像在板上。
-- Precision 使用 [top_precision.bit](../bitstream/top_precision.bit) 和 [top_precision.ltx](../bitstream/top_precision.ltx)。
+- Network、TOPS 和 Precision 共用 [top.bit](../bitstream/top.bit) 和 [top.ltx](../bitstream/top.ltx)。这对文件是 Combined 合并版，包含 `peak_tops_ila`（19 个探针）和 `precision_ila`（8 个探针）。
+- 2026-11-23 用户反馈 Combined 上板测试通过，据此将其作为唯一发布镜像；文件内容保持不变。两个采样脚本默认加载同一份 `top.ltx`，依次运行，无需切换位流或传入 `--ltx`。
 
 ```text
 test/network/output/    每张图片的 result.png 和 result.json
@@ -19,7 +19,7 @@ test/topsw/output/      能效（尚未接入）
 python -m pip install -r requirements-fpga-runtime.txt
 ```
 
-`top_network_tops.bit` 有 84 989 276 字节，SHA256 `93d0ff5f8388a1238d63d189b65adfaa8f34cd73ae5908e70be4d10351757b06`。
+`top.bit` 有 84 989 276 字节，SHA256 `4ea8f0fd2dbcbd11f21146fee50ad9569d4ae30c99cb358cdf93db281a55c2de`。
 
 ---
 
@@ -124,7 +124,7 @@ python test/precision/run.py
 
 ## 峰值 TOPS
 
-烧录 `bitstream/top_network_tops.bit` 并加载 `bitstream/top_network_tops.ltx`。
+烧录 `bitstream/top.bit` 并加载 `bitstream/top.ltx`。
 确认 XDMA 正常并关闭占用 JTAG 的在线会话后，在仓库根目录运行：
 
 ```powershell

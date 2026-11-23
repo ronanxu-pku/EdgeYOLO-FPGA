@@ -28,7 +28,7 @@ nohup bash build_ila.sh > build.log 2>&1 < /dev/null &
 
 默认复用此前 Precision 的 Vivado 2024.2.2、project flow、two-stage 实现策略、32 线程及 4 个路由候选。Vivado 路径可通过 `VIVADO` 环境变量指定。`exit_status` 为退出码；完整结果位于 `build/lite/<profile>_ila_<commit>/ImplOutputDir/`，包括同次生成的 `top.bit`、`top.ltx` 和时序报告。
 
-`ila_manifest.json` 记录源提交、补丁 SHA-256、全部构建源文件 SHA-256，以及 `ila_cores` 中每个核的名称和探针宽度。独立版保留原有 `ila_core` / `probe_widths` 字段。发布时把它与同次构建的 BIT/LTX 一并保存。`source_commit` 是构建来源，不能用它推断旧镜像的来源。现用的历史镜像另行保留，新的构建结果在上板前标记为 `board_validation: pending`。
+`ila_manifest.json` 记录源提交、补丁 SHA-256、全部构建源文件 SHA-256，以及 `ila_cores` 中每个核的名称和探针宽度。独立版保留原有 `ila_core` / `probe_widths` 字段。发布时把它与同次构建的 BIT/LTX 一并保存。`source_commit` 是构建来源，不能用它推断旧镜像的来源。新的构建结果在上板前标记为 `board_validation: pending`。2026-11-23 用户反馈 Combined 上板测试通过后，该配对文件统一发布为 `bitstream/top.bit` 和 `bitstream/top.ltx`，其余发布镜像已移除。
 
 Combined 的两个 ILA 均连接现有 `xdma_0/axi_aclk`，深度均为 1024，输入流水级均为 1。Precision 观测仅在 Tile 0 启用，TOPS 观测覆盖全部 8 Tile。现有 `test/tops/run.py` 和 `test/precision/run.py` 仍按各自的核名称采样，指定合并版对应的同一份 `.ltx` 即可，不需要重新下载另一份位流。两个用例应依次运行，避免同时通过 XDMA 修改同一组工作负载。
 

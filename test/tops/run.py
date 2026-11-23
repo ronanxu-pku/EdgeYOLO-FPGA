@@ -23,7 +23,7 @@ from ila_runtime import capture_env, find_vivado, open_native_waveforms, resolve
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 FPGA_DIR = Path(__file__).resolve().parent / "fpga"
-DEFAULT_LTX = REPO_ROOT / "bitstream" / "top_network_tops.ltx"
+DEFAULT_LTX = REPO_ROOT / "bitstream" / "top.ltx"
 GENERATOR = REPO_ROOT / "project" / "rtl" / "tb" / "lite_bd" / "module_tb" / "golden_module_tb.py"
 UNIT_TB_DIR = REPO_ROOT / "test" / "network" / "scripts" / "host"
 DEFAULT_RUN_DIR = REPO_ROOT / "test" / "tops" / "output" / "fpga_peak_int8"

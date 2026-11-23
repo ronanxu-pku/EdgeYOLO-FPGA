@@ -1,10 +1,10 @@
 # INT8 / INT16 片上计算精度
 
-在 VCU128 的 Tile 0 只发一个任务，逐拍检查输入、4×4 部分积、列和、移位累加和 OBUF 写回。两种精度共用同一组 225 位探针。
+在 VCU128 的 Tile 0 只发一个任务，逐拍检查输入、4×4 部分积、列和、移位累加和 OBUF 写回。两种精度共用同一组 273 位探针（8 个物理探针），包含新增的 48 位相位合并值。
 
 ## 实机测试
 
-在接有 VCU128 JTAG 和 XDMA 的 Windows 主机运行。板卡烧录 `bitstream/top_precision.bit` 并加载 `bitstream/top_precision.ltx`。
+在接有 VCU128 JTAG 和 XDMA 的 Windows 主机运行。板卡烧录 `bitstream/top.bit` 并加载 `bitstream/top.ltx`。
 主机需装有 XDMA 驱动、Python 和 NumPy，以及 Vivado Lab 或 Vivado。
 运行前关闭占用 JTAG 的在线 Hardware Manager 会话。
 
@@ -22,7 +22,7 @@ python test/precision/run.py
 python test/precision/run.py --view-only <本次运行目录>
 ~~~
 
-只测一项或只看一项可加 `--case int8`、`--case int16` 或 `--case int16-high`。探针文件放在别处时可用 `--ltx <top_precision.ltx 路径>`。Vivado 在自定义路径时传 `--vivado <启动器路径>`。多个 JTAG 目标可用 `--hw-target <目标名称>` 指定。
+只测一项或只看一项可加 `--case int8`、`--case int16` 或 `--case int16-high`。探针文件放在别处时可用 `--ltx <top.ltx 路径>`。Vivado 在自定义路径时传 `--vivado <启动器路径>`。多个 JTAG 目标可用 `--hw-target <目标名称>` 指定。
 
 ## 测例
 
@@ -43,6 +43,7 @@ python test/precision/run.py --view-only <本次运行目录>
 | probe4 | `prec_column_sums` | 56 | 核对各列加法树输出。 |
 | probe5 | `prec_phase_acc` | 48 | 核对每拍移位加和后的累加值。 |
 | probe6 | `prec_result_ch0` | 64 | 核对通道 0 的 OBUF 写回，并和主机回读比较。 |
+| probe7 | `prec_phase_sum` | 48 | 观测当前相位的合并值，有效标志同 `prec_stage_valid[3]`。 |
 
 采样时钟 250 MHz，深度 1024，触发位置 32，触发条件 `prec_stage_valid[0] == 1`。INT8 读取物理列 0–1 和写回低 32 位。INT16 读取物理列 0–3 和完整 64 位。最低位切片对应第 0 物理列。
 
