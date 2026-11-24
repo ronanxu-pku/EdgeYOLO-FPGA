@@ -484,6 +484,7 @@ def run_one_shot_fpga(
             print(f"            top1={top['class_name']}({int(top['class_id'])}), score={float(top['score']):.4f}")
             print(f"            image -> {_display_path(result_img)}")
         print(f"            json  -> {_display_path(result_json)}")
+    print(f"result dir: {out_dir.resolve()}", flush=True)
     if compare_exc is not None:
         raise compare_exc
     return result_img
@@ -622,7 +623,7 @@ def run_acceptance_suite(limit: int, networks: list[str],
 
     status = "PASS" if failed == 0 else "FAIL"
     print(f"\nAcceptance {status}: {total - failed}/{total} hardware cases PASS")
-    print(f"output -> {_display_path(OUT_DIR)}")
+    print(f"output -> {OUT_DIR.resolve()}")
     return 0 if failed == 0 else 1
 
 

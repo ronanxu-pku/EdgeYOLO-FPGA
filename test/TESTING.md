@@ -51,7 +51,7 @@ python test/network/run.py --model resnet --precision int16 --num 20
 
 网络测试复用 `cached/compiled/` 中的编译产物，缓存缺失或不完整时重新编译。FPGA 跑完后在主机计算参考特征，将其存入 `cached/golden_cache/`，并比对 FPGA 回读特征。中间特征、二进制读回和计时文件放在 `cached/intermediate/`，单个用例结束后自动清理。单图终端显示检测或分类结果及比对状态，批量运行还显示计时、各输出路径和通过数量。
 
-单图和批量运行都将每张图片的结果直接写到 `output/<模型>_<精度>_<图片编号>_<执行时间>/`。YOLO 使用 COCO 原图 ID，例如 `000000000139.jpg` 对应 `139`。ResNet 使用图片在清单中的位置，从 1 开始。同一次运行的时间戳相同。
+单图和批量运行都将每张图片的结果直接写到 `output/<模型>_<精度>_<图片编号>_<执行时间>/`。每张图片保存完成后，终端打印 `result dir: <结果目录的绝对路径>`，可复制到资源管理器地址栏，打开其中的 `result.png` 和 `result.json`。YOLO 使用 COCO 原图 ID，例如 `000000000139.jpg` 对应 `139`。ResNet 使用图片在清单中的位置，从 1 开始。同一次运行的时间戳相同。
 
 ```text
 test/network/output/
