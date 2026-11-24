@@ -1,8 +1,8 @@
 """EdgeYOLO-FPGA 的自包含运行入口。
 
 仓库包含 PT/ONNX/解析模型以及 20+20 张测试图片。
-每张图的结果写到 ``test/network/output/<模型>_<精度>_<图片编号>_<执行时间>/``。
-每个目录只保存 ``result.png`` 和 ``result.json``；编译缓存和中间数据放在 ``cached/``。
+同一批次的图片结果写到 ``test/network/output/<模型>_<精度>_<执行时间>/``。
+每张图保存 ``result_<图片编号>.png/json``；编译缓存和中间数据放在 ``cached/``。
 
 常用命令::
 
@@ -120,9 +120,9 @@ def _display_path(path: Path) -> Path:
         return resolved
 
 
-def _result_dir(network: str, precision: str, example: dict, run_time: str) -> Path:
+def _result_dir(network: str, precision: str, run_time: str) -> Path:
     tag = _one_shot_tag(network, precision)
-    return OUT_DIR / f"{network}_{tag}_{example['index']}_{run_time}"
+    return OUT_DIR / f"{network}_{tag}_{run_time}"
 
 
 def _migrate_legacy_outputs(run_time: str) -> None:
@@ -356,6 +356,7 @@ def run_one_shot_fpga(
     img_path: Path,
     out_dir: Path,
     *,
+    image_index: int,
     build_dir: Path,
     parsed_dir: Path,
     conf: float = DEFAULT_CONF,
@@ -373,8 +374,8 @@ def run_one_shot_fpga(
     if session is None:
         _ensure_one_shot_artifact(network, precision, build_dir, parsed_dir)
 
-    result_img = out_dir / "result.png"
-    result_json = out_dir / "result.json"
+    result_img = out_dir / f"result_{image_index}.png"
+    result_json = out_dir / f"result_{image_index}.json"
     plan = json.loads((build_dir / "plan.json").read_text())
     named_outputs = bool(plan.get("host_io", {}).get("outputs"))
 
@@ -457,8 +458,9 @@ def run_one_shot_fpga(
         (staged / result_json.name).write_text(
             json.dumps(result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
         )
-        out_dir.parent.mkdir(parents=True, exist_ok=True)
-        staged.rename(out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (staged / result_img.name).rename(result_img)
+        (staged / result_json.name).rename(result_json)
 
     if not batch:
         _print_compact_predictions(network, result)
@@ -590,6 +592,7 @@ def run_acceptance_suite(limit: int, networks: list[str],
         _, examples = _load_examples(manifest, limit)
         precisions = yolo_precisions if network == "yolo" else resnet_precisions
         for precision in precisions:
+            out_dir = _result_dir(network, precision, run_time)
             if network == "yolo":
                 build_dir = yolo_profile["builds"][precision]
                 parsed_dir = yolo_profile["parsed"][precision]
@@ -608,7 +611,8 @@ def run_acceptance_suite(limit: int, networks: list[str],
                     total += 1
                     try:
                         run_one_shot_fpga(
-                            network, precision, image, _result_dir(network, precision, item, run_time),
+                            network, precision, image, out_dir,
+                            image_index=item["index"],
                             build_dir=build_dir,
                             parsed_dir=parsed_dir,
                             conf=conf,
@@ -692,7 +696,8 @@ def main() -> int:
                 parsed_dir = ONE_SHOT_COMPILE_PARSED[(network, precision)]
             try:
                 run_one_shot_fpga(
-                    network, precision, image, _result_dir(network, precision, example, run_time),
+                    network, precision, image, _result_dir(network, precision, run_time),
+                    image_index=example["index"],
                     build_dir=build_dir,
                     parsed_dir=parsed_dir,
                     conf=args.conf,

@@ -29,9 +29,9 @@ Precision/TOPS 在保存报告、打印目录后打开原生 Vivado 波形；打
 test/
   TEST.md
   network/
-    output/<模型>_<精度>_<图片编号>_<时间戳>/
-      result.png
-      result.json
+    output/<模型>_<精度>_<时间戳>/
+      result_<图片编号>.png
+      result_<图片编号>.json
     cached/                       编译缓存、golden 缓存及中间数据
   precision/
     output/<时间戳>/
@@ -109,11 +109,12 @@ python .\test\network\run.py --model all --precision both --num 20
 | `--num` | 每组 1–20 张，默认 1；`all + both + 20` 共 80 个用例 |
 | `--conf` | YOLO 检测阈值，默认 0.25 |
 
-每张图生成 `result.png` 和 `result.json`，单图与批量运行都会打印该图的完整输出目录。
-YOLO 目录中的图片编号来自 COCO 原图 ID，ResNet 使用图片清单中的序号。
+一次运行中，每个模型和精度组合共用一个输出目录；`--num 20` 在该目录保存20对
+`result_<图片编号>.png` 和 `result_<图片编号>.json`，不再逐图创建子目录。
+YOLO 的图片编号使用 COCO 原图 ID（例如 `result_139.png/json`），ResNet 使用图片清单中的序号，均不补前导零。
+单图与批量运行都会打印完整输出目录；选择 `all` 或 `both` 时，不同模型和精度分别保存。
 JSON 保存预测结果、置信度/得分、检测框，以及 FPGA 特征与主机参考结果是否一致。
 YOLO 的框使用原图像素坐标 `xyxy`；ResNet 的得分是 logit，不是概率。
-网络输出格式保持原有约定。
 
 编译缓存缺失时自动编译。主机参考值在 FPGA 执行后计算并校验。
 Detect head / NMS 以及 ResNet GAP / FC / Top-k 在主机执行。
