@@ -1,10 +1,13 @@
 """Extract the INT8 throughput and correctness evidence from one TOPS capture."""
 import csv
+import sys
 from pathlib import Path
 
 import numpy as np
 
-from ila_runtime import parse_bus
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from utils.ila.ila_runtime import parse_bus
 
 
 PROBES = {

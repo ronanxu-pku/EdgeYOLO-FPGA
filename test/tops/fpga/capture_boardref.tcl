@@ -28,13 +28,13 @@ proc dcim_boardref_save {folder} {
     set folder [file normalize $folder]
     set archive [file join $folder peak_int8.ila]
     set csv [file join $folder peak_int8.csv]
-    if {[file exists $archive] || [file exists $csv]} {
-        error "A capture already exists in $folder. Choose a new output folder."
-    }
     set ila [dcim_boardref_core]
     wait_on_hw_ila -timeout 1 $ila
     set data [upload_hw_ila_data $ila]
     file mkdir $folder
+    foreach path [list $archive $csv] {
+        if {[file isfile $path]} { file delete $path }
+    }
     write_hw_ila_data $archive $data
     write_hw_ila_data -csv_file $csv $data
     display_hw_ila_data $data

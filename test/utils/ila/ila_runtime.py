@@ -105,10 +105,19 @@ def run_vivado(vivado: str, script: Path, cwd: Path, env: dict, mode: str):
             f'cmd.exe /d /v:off /s /c ""%DCIM_PRECISION_VIVADO%" -mode {mode} '
             '-source "%DCIM_PRECISION_SCRIPT%" -notrace -nolog -nojournal"'
         )
-    return subprocess.run(command, executable=executable, cwd=cwd, env=env,
-                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                          text=True, errors="replace")
+    options = dict(executable=executable, cwd=cwd, env=env, stdout=subprocess.PIPE,
+                   stderr=subprocess.STDOUT, text=True, errors="replace")
+    if mode != "batch":
+        return subprocess.run(command, **options)
 
+    lines = []
+    with subprocess.Popen(command, **options) as process:
+        assert process.stdout is not None
+        for line in process.stdout:
+            lines.append(line)
+            if line.startswith("DCIM_CAPTURE "):
+                print(line.removeprefix("DCIM_CAPTURE ").rstrip(), flush=True)
+        return subprocess.CompletedProcess(command, process.wait(), "".join(lines))
 
 
 def resolve_ltx(repo: Path, override: Path | None) -> Path:
@@ -135,7 +144,7 @@ def open_native_waveforms(vivado: str, captures: dict[str, Path], probes: tuple[
             native_wave_config(path, work / f"{name}.wcfg", probes, last_sample)
             shutil.copyfile(path, work / f"{name}.ila")
         env = dict(os.environ, DCIM_PRECISION_VIEW_CASES=" ".join(captures), DCIM_PRECISION_VIEW_ROOT=str(work))
-        script = Path(__file__).with_name("precision") / "view.tcl"
+        script = Path(__file__).with_name("view.tcl")
         opened = run_vivado(vivado, script, Path(tempfile.gettempdir()), env, "gui")
         error_path = work / "view_error.txt"
         if error_path.is_file():

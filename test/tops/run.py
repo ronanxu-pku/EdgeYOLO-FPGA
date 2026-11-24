@@ -18,7 +18,8 @@ from pathlib import Path
 from zipfile import BadZipFile, ZipFile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from ila_runtime import capture_env, find_vivado, open_native_waveforms, resolve_ltx, run_vivado
+from utils.ila.ila_runtime import capture_env, find_vivado, open_native_waveforms, resolve_ltx, run_vivado
+from utils.ila.results import load_json, read_text, readback_comparison, start_result, timestamp, write_result
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -26,7 +27,7 @@ FPGA_DIR = Path(__file__).resolve().parent / "fpga"
 DEFAULT_LTX = REPO_ROOT / "bitstream" / "top.ltx"
 GENERATOR = REPO_ROOT / "project" / "rtl" / "tb" / "lite_bd" / "module_tb" / "golden_module_tb.py"
 UNIT_TB_DIR = REPO_ROOT / "test" / "network" / "scripts" / "host"
-DEFAULT_RUN_DIR = REPO_ROOT / "test" / "tops" / "output" / "fpga_peak_int8"
+DEFAULT_RUN_DIR = REPO_ROOT / "test" / "tops" / "output"
 
 MATRIX_M = 64
 MATRIX_K = 64
@@ -112,62 +113,7 @@ def calculate_tops(active_cycles: int, frequency_mhz: float, operations: int) ->
 
 def write_report(report_path: Path, report: dict) -> None:
     report_path.parent.mkdir(parents=True, exist_ok=True)
-    report_path.write_text(
-        json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-    )
-
-    tops = report.get("calculated_peak_tops")
-    cycles = report.get("ila_active_cycles")
-    tops_text = "pending ILA cycle entry" if tops is None else f"{tops:.6f} TOPS"
-    cycles_text = "pending" if cycles is None else str(cycles)
-    host_results = report.get("host_results", [])
-    verified = sum(int(item.get("passed", 0)) for item in host_results)
-    total = sum(int(item.get("total_words", 0)) for item in host_results)
-
-    md_path = report_path.with_suffix(".md")
-    md_lines = [
-        "# FPGA peak INT8 report",
-        "",
-        f"- Status: **{report['status']}**",
-        f"- Matrix: M={MATRIX_M}, K={MATRIX_K}, N={MATRIX_N}",
-        f"- Repeat rounds: {report['benchmark_repeat_count']}",
-        f"- Operations: {report['operations']} (multiply and add counted separately)",
-        f"- Host correctness: {verified}/{total} 128-bit words",
-        f"- ILA all-Tile active cycles: {cycles_text}",
-        f"- Clock: {report['frequency_mhz']:.6f} MHz",
-        f"- Peak compute: **{tops_text}**",
-        "",
-    ]
-    power = report.get("power")
-    if power:
-        md_lines.extend([
-            "## Power (idle vs repeat)",
-            "",
-            f"- Idle VCCINT: {_fmt_w(power.get('idle_vccint_w'))} W",
-            f"- Repeat VCCINT: {_fmt_w(power.get('repeat_vccint_w'))} W",
-            f"- dP VCCINT: {_fmt_w(power.get('delta_vccint_w'))} W",
-            f"- dP VCCINT+VCCBRAM: {_fmt_w(power.get('delta_vccint_vccbram_w'))} W",
-            f"- Assumed peak: {_fmt_w(power.get('assumed_peak_tops'))} TOPS",
-            f"- TOPS/W VCCINT: {_fmt_w(power.get('tops_per_w_vccint'))}",
-            f"- TOPS/W VCCINT+VCCBRAM: {_fmt_w(power.get('tops_per_w_vccint_vccbram'))}",
-            "",
-        ])
-    md_lines.extend([
-        "TOPS is valid only when every counted sample has peak_compute_mask == 0xff.",
-        "Data transfer, loading and writeback cycles are intentionally excluded.",
-        "",
-        "## Expected ILA evidence",
-        "",
-        "| Signal | Expected value |",
-        "|---|---|",
-    ])
-    md_lines.extend(
-        "| {} | {} |".format(name, value)
-        for name, value in report["expected_ila"].items()
-    )
-    md_path.write_text("\n".join(md_lines) + "\n", encoding="utf-8")
-    print(f"[report] {report_path}")
-    print(f"[report] {md_path}")
+    report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
 def load_previous_report(report_path: Path) -> dict:
@@ -182,7 +128,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Run and report the exact-fit 2.048-TOPS INT8 FPGA case"
     )
-    parser.add_argument("--run-dir", type=Path)
+    parser.add_argument("--run-dir", type=Path, help="Output directory; replace this test's existing result files")
     parser.add_argument("--regenerate", action="store_true", help="regenerate test vectors")
     execution = parser.add_mutually_exclusive_group()
     execution.add_argument("--prepare-only", action="store_true", help="only generate test files")
@@ -362,7 +308,9 @@ def open_peak_waveform(vivado: str, path: Path) -> int:
         names = ALL_TILE_VIEW if b"peak_tile7_result_ch0" in config else BOARDREF_PROBES
         probes = tuple(prefix + name for name in names)
     last_sample = 185
-    report_path = path.with_name("fpga_peak_report.json")
+    report_path = path.with_name("result.json")
+    if not report_path.is_file():
+        report_path = path.with_name("fpga_peak_report.json")
     if report_path.is_file():
         report = load_previous_report(report_path)
         last_write = report.get("ila_capture", {}).get("last_write_sample")
@@ -374,79 +322,67 @@ def open_peak_waveform(vivado: str, path: Path) -> int:
 def capture_peak(args: argparse.Namespace) -> int:
     from fpga.verify_peak import verify_peak
 
-    vivado = find_vivado(args.vivado)
-    ltx = resolve_ltx(REPO_ROOT, args.ltx or DEFAULT_LTX)
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    run_dir = (args.run_dir or DEFAULT_RUN_DIR / stamp).resolve()
-    if run_dir.exists():
-        raise FileExistsError(run_dir)
-    env = capture_env(sys.executable, ltx, args.hw_server, args.hw_target)
-    env.update(DCIM_TOPS_TIMEOUT=str(args.timeout_s), DCIM_TOPS_QUIET=str(int(args.quiet_xdma)),
-               DCIM_TOPS_STAGING=args.staging)
-    script = FPGA_DIR / "capture.tcl"
-    print("Arming TOPS ILA and running the 64-job INT8 workload...", flush=True)
-    with tempfile.TemporaryDirectory(prefix="dcim_tops_capture_", ignore_cleanup_errors=True) as scratch:
-        work = Path(scratch) / "run"
-        env["DCIM_TOPS_CAPTURE_ROOT"] = str(work)
-        batch = run_vivado(vivado, script, Path(tempfile.gettempdir()), env, "batch")
-        run_dir.mkdir(parents=True, exist_ok=False)
-        (run_dir / "vivado.log").write_text(batch.stdout, encoding="utf-8")
-        for name in ("peak_int8.ila", "peak_int8.csv", "fpga_peak_report.json"):
-            path = work / name
-            if path.is_file():
-                shutil.copyfile(path, run_dir / name)
-        capture = run_dir / "peak_int8.ila"
-        if not capture.is_file() or not capture.stat().st_size:
-            raise ValueError(f"Vivado did not save a TOPS ILA capture. See {run_dir / 'vivado.log'}")
-        report = load_previous_report(run_dir / "fpga_peak_report.json")
-        try:
+    run_dir = (args.run_dir or DEFAULT_RUN_DIR / timestamp()).resolve()
+    report = start_result(run_dir, "tops", TOPS_OUTPUT_FILES)
+    try:
+        vivado = find_vivado(args.vivado)
+        ltx = resolve_ltx(REPO_ROOT, args.ltx or DEFAULT_LTX)
+        env = capture_env(sys.executable, ltx, args.hw_server, args.hw_target)
+        env.update(DCIM_TOPS_TIMEOUT=str(args.timeout_s), DCIM_TOPS_QUIET=str(int(args.quiet_xdma)),
+                   DCIM_TOPS_STAGING=args.staging)
+        print("Arming TOPS ILA and running the 64-job INT8 workload...", flush=True)
+        with tempfile.TemporaryDirectory(prefix="dcim_tops_capture_", ignore_cleanup_errors=True) as scratch:
+            work = Path(scratch) / "run"
+            env["DCIM_TOPS_CAPTURE_ROOT"] = str(work)
+            batch = run_vivado(vivado, FPGA_DIR / "capture.tcl", Path(tempfile.gettempdir()), env, "batch")
+            report.update(load_json(work / "host_report.json"))
+            report.update(schema="edgeyolo.tops.v2", vivado_log=batch.stdout,
+                          vivado_returncode=batch.returncode, probes_file=str(ltx),
+                          samples_csv=read_text(work / "peak_int8.csv"),
+                          comparison=readback_comparison(work))
+            capture = run_dir / "peak_int8.ila"
+            archive = work / capture.name
+            if archive.is_file() and archive.stat().st_size:
+                shutil.copyfile(archive, capture)
+                report["ila_file"] = capture.name
+            else:
+                raise ValueError("Vivado did not save a TOPS ILA capture; see vivado_log")
+            report["status"] = "FAIL_EVIDENCE"
+            if report["comparison"].get("match") is not True:
+                raise ValueError("Saved FPGA readback did not match the complete golden result")
             evidence = verify_peak(work, report)
-        except (OSError, ValueError) as error:
-            report.update(run_dir=str(run_dir), status="FAIL_EVIDENCE", capture_error=str(error))
-            (run_dir / "fpga_peak_report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-            raise ValueError(f"{error}. View the captured samples with --view-only \"{capture}\"") from error
-        if batch.returncode:
-            raise ValueError(f"Vivado capture did not complete successfully. See {run_dir / 'vivado.log'}")
-        cycles = evidence["issue_cycles"]
-        tops = calculate_tops(cycles, args.frequency_mhz, OPERATIONS_PER_ROUND)
-        report.update(
-            run_dir=str(run_dir), status="PASS" if tops >= TOPS_REQUIREMENT else "FAIL_TOPS",
-            frequency_mhz=args.frequency_mhz, ila_active_cycles=cycles, calculated_peak_tops=tops,
-            meets_2tops=tops >= TOPS_REQUIREMENT, ila_capture=evidence,
-            probes_file=str(ltx),
-            ila_cycle_qualification="elapsed from first issue through last issue, inclusive",
-        )
-        report.pop("expected_ila", None)
-        (run_dir / "fpga_peak_report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-
+            report["ila_capture"] = evidence
+            if batch.returncode:
+                raise RuntimeError("Vivado capture did not complete successfully; see vivado_log")
+            cycles = evidence["issue_cycles"]
+            tops = calculate_tops(cycles, args.frequency_mhz, OPERATIONS_PER_ROUND)
+            report.update(
+                status="PASS" if tops >= TOPS_REQUIREMENT else "FAIL_TOPS", result="same",
+                frequency_mhz=args.frequency_mhz, ila_active_cycles=cycles, calculated_peak_tops=tops,
+                meets_2tops=tops >= TOPS_REQUIREMENT,
+                ila_cycle_qualification="elapsed from first issue through last issue, inclusive",
+            )
+            report["pass"] = report["status"] == "PASS"
+            report.pop("expected_ila", None)
+    except (OSError, RuntimeError, ValueError) as error:
+        failed_evidence = report.get("status") == "FAIL_EVIDENCE"
+        report.update(status="FAIL_EVIDENCE" if failed_evidence else "FAIL_CAPTURE",
+                      error=f"{type(error).__name__}: {error}",
+                      result="different" if failed_evidence else "incomplete")
+        report["pass"] = False
+    finally:
+        write_result(run_dir, report)
+    if report["status"] not in ("PASS", "FAIL_TOPS"):
+        print(f"TOPS test failed: {report['error']}", file=sys.stderr)
+        return 1
     print(f"{report['status']} INT8: {evidence['host_words_matched']} words match, "
           f"{cycles} cycles @ {args.frequency_mhz:g} MHz, {tops:.3f} TOPS")
-    print(f"Native capture: {capture}", flush=True)
     view_result = open_peak_waveform(vivado, capture)
     return view_result or int(not report["meets_2tops"])
 
 
-def main() -> int:
-    args = parse_args()
-    if args.view_only:
-        try:
-            return open_peak_waveform(find_vivado(args.vivado), args.view_only.resolve())
-        except (OSError, RuntimeError, ValueError, BadZipFile, ET.ParseError) as error:
-            print(f"TOPS waveform error: {error}", file=sys.stderr)
-            return 1
-
-    if not (args.prepare_only or args.report_only or args.xdma_only or args.measure_power
-            or args.ila_active_cycles is not None or args.repeat_count not in (None, 1)):
-        if os.name != "nt":
-            raise SystemExit("the FPGA runner requires Windows and the XDMA driver")
-        try:
-            return capture_peak(args)
-        except (OSError, RuntimeError, ValueError, BadZipFile, ET.ParseError) as error:
-            print(f"TOPS test failed: {error}", file=sys.stderr)
-            return 1
-
-    run_dir = (args.run_dir or DEFAULT_RUN_DIR).resolve()
-    report_path = run_dir / "fpga_peak_report.json"
+def run_host_report(args: argparse.Namespace, run_dir: Path) -> int:
+    report_path = run_dir / ("result.json" if args.report_only else "host_report.json")
 
     if args.report_only:
         if args.ila_active_cycles is None:
@@ -509,8 +445,10 @@ def main() -> int:
             if sampler is not None:
                 sampler.mark("compute_end")
 
+        runner = None
         try:
-            results = ChipRunnerWin(verbose=not args.quiet_xdma).run_case(
+            runner = ChipRunnerWin(verbose=not args.quiet_xdma)
+            results = runner.run_case(
                 run_dir,
                 timeout_s=timeout_s,
                 staging=args.staging,
@@ -526,6 +464,8 @@ def main() -> int:
             host_pass = False
             error = f"{type(exc).__name__}: {exc}"
         finally:
+            if runner is not None:
+                runner.x.close()
             if sampler is not None:
                 if "compute_end" not in sampler.marks:
                     sampler.mark("compute_end")
@@ -534,8 +474,12 @@ def main() -> int:
                     OPERATIONS_PER_ROUND * args.frequency_mhz * 1e6 / 128.0 / 1e12
                 )
                 power_report = sampler.report(theoretical_tops)
+                power_report.update(samples=sampler.snaps, marks=sampler.marks)
 
+        comparison = readback_comparison(run_dir)
+        host_pass = host_pass and comparison.get("match") is True
         report = {
+            "comparison": comparison,
             "schema": "edgeyolo.fpga_peak_int8.v1",
             "generated_at": utc_now(),
             "run_dir": str(run_dir),
@@ -558,7 +502,7 @@ def main() -> int:
     report["updated_at"] = utc_now()
     report["frequency_mhz"] = args.frequency_mhz
     report["ila_active_cycles"] = args.ila_active_cycles
-    report["ila_cycle_qualification"] = "count only samples where peak_compute_mask == 0xff"
+    report["ila_cycle_qualification"] = "manual input: count only samples where peak_compute_mask == 0xff" if args.ila_active_cycles is not None else "pending ILA capture"
 
     if args.ila_active_cycles is None:
         report["calculated_peak_tops"] = None
@@ -579,21 +523,69 @@ def main() -> int:
         else:
             report["status"] = "FAIL_TOPS"
 
+    report["pass"] = report["status"] == "PASS"
+    report["result"] = "same" if host_pass else "different" if report.get("comparison", {}).get("match") is False else "incomplete"
     write_report(report_path, report)
 
-    if report["status"] == "PASS_HOST_PENDING_ILA" and not args.xdma_only:
-        print("\nHost result PASS. Export/check the ILA waveform, then run:")
-        expected_cycles = 128 * int(report.get("benchmark_repeat_count", 1))
-        print(
-            f'  python "{Path(__file__).resolve()}" --report-only '
-            f'--ila-active-cycles {expected_cycles}'
-        )
-    elif report.get("calculated_peak_tops") is not None:
+    if report.get("calculated_peak_tops") is not None:
         print(f"\nCalculated peak: {report['calculated_peak_tops']:.6f} TOPS")
     if report.get("error"):
         print(f"\nFPGA error: {report['error']}", file=sys.stderr)
 
     return 0 if report["status"] in ("PASS", "PASS_HOST_PENDING_ILA") else 1
+
+
+TOPS_OUTPUT_FILES = ("peak_int8.ila", "peak_int8.csv", "fpga_peak_report.json",
+                     "fpga_peak_report.md", "vivado.log", "host_report.json")
+
+
+def main() -> int:
+    args = parse_args()
+    try:
+        if args.view_only:
+            return open_peak_waveform(find_vivado(args.vivado), args.view_only.resolve())
+        if args.repeat_count is not None and args.repeat_count < 1:
+            raise ValueError("--repeat-count must be >= 1")
+        if args.prepare_only:
+            run_dir = (args.run_dir or DEFAULT_RUN_DIR.parent / "cached/prepared" / timestamp()).resolve()
+            prepare_case(run_dir, args.regenerate, args.repeat_count or 1)
+            print(f"Prepared FPGA peak case: {run_dir}")
+            return 0
+        if args.report_only:
+            if args.run_dir is None:
+                raise ValueError("--report-only requires --run-dir pointing to a previous result directory")
+            run_dir = args.run_dir.resolve()
+            code = run_host_report(args, run_dir)
+            write_result(run_dir, load_json(run_dir / "result.json"))
+            return code
+        if os.name != "nt":
+            raise ValueError("The FPGA runner requires Windows and the XDMA driver")
+        if args.xdma_only:
+            if args.run_dir is None:
+                raise ValueError("The XDMA worker requires --run-dir")
+            return run_host_report(args, args.run_dir.resolve())
+        if not (args.measure_power or args.ila_active_cycles is not None or args.repeat_count not in (None, 1)):
+            return capture_peak(args)
+
+        run_dir = (args.run_dir or DEFAULT_RUN_DIR / timestamp()).resolve()
+        report = start_result(run_dir, "tops", TOPS_OUTPUT_FILES)
+        try:
+            with tempfile.TemporaryDirectory(prefix="dcim_tops_host_") as scratch:
+                work = Path(scratch)
+                code = run_host_report(args, work)
+                report.update(load_json(work / "host_report.json"))
+                report["schema"] = "edgeyolo.tops.v2"
+        except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+            report.update(status="FAIL_HOST", error=str(error))
+            code = 1
+        finally:
+            write_result(run_dir, report)
+        if report["status"] == "PASS_HOST_PENDING_ILA":
+            print("Host comparison passed; no automatic ILA capture in repeat/power mode.")
+        return code
+    except (OSError, RuntimeError, ValueError, BadZipFile, ET.ParseError) as error:
+        print(f"TOPS test failed: {error}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

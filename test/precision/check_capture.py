@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from ila_runtime import parse_bus
+from utils.ila.ila_runtime import parse_bus
 
 PROBES = (
     "stage_valid", "act_slice", "weight_slices", "partial_products",
@@ -107,16 +107,25 @@ def main():
     parser.add_argument("capture_dir", type=Path)
     folder = parser.parse_args().capture_dir
     case = json.loads((folder / "readback.json").read_text(encoding="utf-8"))
-    if not case["pass"]:
-        raise ValueError("Host readback did not pass")
-    cycle, actual = verify(case, read_stages(folder / "precision.csv"))
-    if actual != case["actual"]:
-        raise ValueError("ILA and host readback disagree")
-    result = {"case": case["case"], "write_cycle": cycle, "actual": actual,
-              "actual_hex": case["actual_hex"], "expected": case["expected"], "pass": True}
-    (folder / "waveform_check.json").write_text(json.dumps(result, indent=2) + "\n")
-    print(f"ILA PASS {case['case']}: cycle {cycle}, result {case['actual_hex']} ({actual})")
+    result = {"case": case["case"], "seed": case.get("seed"),
+              "expected": case["expected"], "pass": False}
+    try:
+        stages = read_stages(folder / "precision.csv")
+        if len(stages[-1]) == 1:
+            width = case["output_bits"]
+            raw = stages[-1][0][1] & ((1 << width) - 1)
+            result.update(actual=signed(raw, width), actual_hex=f"0x{raw:0{width // 4}X}")
+        cycle, actual = verify(case, stages)
+        result["write_cycle"] = cycle
+        if not case["pass"] or actual != case["actual"]:
+            raise ValueError("ILA, host readback and Golden did not all agree")
+        result["pass"] = True
+    except (OSError, ValueError) as error:
+        result["error"] = str(error)
+    (folder / "waveform_check.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+    print(f"ILA {'PASS' if result['pass'] else 'FAIL'} {case['case']}: {result}")
+    return 0 if result["pass"] else 1
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

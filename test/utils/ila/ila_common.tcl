@@ -1,3 +1,8 @@
+proc dcim_progress {message} {
+    puts "DCIM_CAPTURE $message"
+    flush stdout
+}
+
 # Vivado sets its own Python environment. XDMA uses the host interpreter.
 proc run_dcim_host_python {python args} {
     set original [dict create]
@@ -19,6 +24,7 @@ proc run_dcim_host_python {python args} {
 }
 
 proc with_dcim_hw_device {body} {
+    dcim_progress "Connecting to Vivado Hardware Manager and JTAG"
     open_hw_manager
     try {
         connect_hw_server -url $::env(DCIM_ILA_HW_SERVER)

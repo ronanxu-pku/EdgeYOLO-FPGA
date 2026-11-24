@@ -1,5 +1,5 @@
 set testDir [file dirname [file normalize [info script]]]
-source [file join $testDir .. .. ila_common.tcl]
+source [file join $testDir .. .. utils ila ila_common.tcl]
 
 with_dcim_hw_device {
     set ila [get_hw_ilas -of_objects [current_hw_device] -filter {CELL_NAME =~ "*/peak_tops_ila"}]
@@ -33,7 +33,7 @@ with_dcim_hw_device {
         run_dcim_host_python $::env(DCIM_ILA_PYTHON) [file join $testDir .. run.py] {*}$workerArgs
     } hostLog]
     puts $hostLog
-    if {$failed && ![file isfile [file join $folder fpga_peak_report.json]]} {
+    if {$failed && ![file isfile [file join $folder host_report.json]]} {
         error "TOPS XDMA execution or host readback check failed"
     }
     puts "DCIM_CAPTURE TOPS workload finished, reading the ILA capture"

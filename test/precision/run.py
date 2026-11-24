@@ -8,7 +8,6 @@ import shutil
 import sys
 import tempfile
 import xml.etree.ElementTree as ET
-from datetime import datetime
 from pathlib import Path
 from zipfile import BadZipFile
 
@@ -16,7 +15,10 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from ila_runtime import capture_env, find_vivado, open_native_waveforms, resolve_ltx, run_vivado
+from utils.ila.ila_runtime import (
+    capture_env, find_vivado, open_native_waveforms, resolve_ltx, run_vivado,
+)
+from utils.ila.results import load_json, read_text, readback_comparison, start_result, timestamp, write_result
 
 sys.path.insert(0, str(ROOT / "project/rtl/tb/lite_bd/module_tb"))
 import golden_module_tb as golden
@@ -28,8 +30,20 @@ CASES = {
 }
 
 
-def prepare_case(case: str, run_dir: Path) -> dict:
+def prepare_case(case: str, run_dir: Path, seed: int | None = None) -> dict:
     bits, lanes, activation, weight = CASES[case]
+    if seed is not None:
+        if seed < 0:
+            raise ValueError("--seed must be a non-negative integer.")
+        if case == "int16-high":
+            raise ValueError("int16-high is a fixed overflow case; omit --seed.")
+        # Key the stream by precision so --mode both and separate runs agree.
+        rng = np.random.Generator(np.random.PCG64([seed, bits]))
+        operands = rng.integers(1, 1 << bits, size=2)
+        activation, weight = (
+            int(value) - (1 << bits) if value >= (1 << (bits - 1)) else int(value)
+            for value in operands
+        )
     native16 = bits == 16
     dtype = np.dtype("<i2") if native16 else np.dtype("i1")
     out_channels = golden.DCIM_INT16_OUT_CH_PER_TILE if native16 else golden.DCIM_INT8_OUT_CH_PER_TILE
@@ -67,6 +81,7 @@ def prepare_case(case: str, run_dir: Path) -> dict:
     )
     evidence = {
         "case": case, "operand_bits": bits, "output_bits": 64 if native16 else 32,
+        "seed": seed,
         "active_inputs": lanes, "activation": activation, "weight": weight,
         "expected": int(accumulator[0, 0]), "words_per_tile": words_per_tile,
     }
@@ -74,8 +89,9 @@ def prepare_case(case: str, run_dir: Path) -> dict:
     return evidence
 
 
-def run_xdma(case: str, run_dir: Path, timeout_s: float, quiet_xdma: bool) -> int:
-    evidence = prepare_case(case, run_dir)
+def run_xdma(case: str, run_dir: Path, timeout_s: float, quiet_xdma: bool,
+             seed: int | None = None) -> int:
+    evidence = prepare_case(case, run_dir, seed)
     sys.path.insert(0, str(ROOT / "project/runtime"))
     from xdma_win import ChipRunnerWin, TILE_OBUF_BASE
 
@@ -124,46 +140,71 @@ def open_precision_waveforms(vivado: str, run_dir: Path, cases: tuple[str, ...])
 
 
 def capture_on_board(args: argparse.Namespace, cases: tuple[str, ...], run_dir: Path) -> int:
-    vivado = find_vivado(args.vivado)
-    ltx = resolve_ltx(ROOT, args.ltx)
-    if run_dir.exists():
-        raise FileExistsError(run_dir)
-
-    env = capture_env(sys.executable, ltx, args.hw_server, args.hw_target)
-    env.update(DCIM_PRECISION_CASES=" ".join(cases), DCIM_PRECISION_TIMEOUT=str(args.timeout_s),
-               DCIM_PRECISION_QUIET=str(int(args.quiet_xdma)))
-    script = Path(__file__).with_name("capture.tcl").resolve()
-    with tempfile.TemporaryDirectory(prefix="dcim_ila_capture_", ignore_cleanup_errors=True) as scratch:
-        work = Path(scratch)
-        env["DCIM_PRECISION_CAPTURE_ROOT"] = str(work)
-        # A Vivado hardware server can outlive the batch process and retain its cwd.
-        completed = run_vivado(vivado, script, Path(tempfile.gettempdir()), env, "batch")
-        if completed.returncode:
-            print("\n".join(completed.stdout.splitlines()[-24:]), file=sys.stderr)
-            return completed.returncode
-
-        results = {}
-        for case in cases:
-            folder = work / case
-            result = json.loads((folder / "waveform_check.json").read_text(encoding="utf-8"))
-            if result.get("case") != case or result.get("pass") is not True or not (folder / "capture.ila").is_file():
-                raise RuntimeError(f"Incomplete or failed FPGA capture for {case}")
-            results[case] = result
-
-        run_dir.mkdir(parents=True, exist_ok=False)
-        for case, result in results.items():
-            path = run_dir / f"{case}.ila"
-            shutil.copyfile(work / case / "capture.ila", path)
-            print(f"FPGA PASS {case}: {result['actual_hex']} ({result['actual']}) "
-                  f"matches the host and Golden, write cycle {result['write_cycle']}: {path}", flush=True)
-
+    report = start_result(run_dir, "precision", (*[f"{case}.ila" for case in CASES], "vivado.log"))
+    report.update(seed=args.seed, cases={})
+    try:
+        vivado = find_vivado(args.vivado)
+        ltx = resolve_ltx(ROOT, args.ltx)
+        report["probes_file"] = str(ltx)
+        env = capture_env(sys.executable, ltx, args.hw_server, args.hw_target)
+        env.update(DCIM_PRECISION_CASES=" ".join(cases), DCIM_PRECISION_TIMEOUT=str(args.timeout_s),
+                   DCIM_PRECISION_QUIET=str(int(args.quiet_xdma)))
+        env.pop("DCIM_PRECISION_SEED", None)
+        if args.seed is not None:
+            env["DCIM_PRECISION_SEED"] = str(args.seed)
+        script = Path(__file__).with_name("capture.tcl").resolve()
+        print("Starting Vivado precision capture for " + ", ".join(cases), flush=True)
+        with tempfile.TemporaryDirectory(prefix="dcim_ila_capture_", ignore_cleanup_errors=True) as scratch:
+            work = Path(scratch)
+            env["DCIM_PRECISION_CAPTURE_ROOT"] = str(work)
+            completed = run_vivado(vivado, script, Path(tempfile.gettempdir()), env, "batch")
+            report.update(vivado_returncode=completed.returncode, vivado_log=completed.stdout)
+            for case in cases:
+                folder = work / case
+                inputs = load_json(folder / "case.json")
+                host = load_json(folder / "readback.json")
+                check = load_json(folder / "waveform_check.json")
+                words = readback_comparison(folder)
+                archive = folder / "capture.ila"
+                captured = archive.is_file() and archive.stat().st_size > 0
+                if captured:
+                    shutil.copyfile(archive, run_dir / f"{case}.ila")
+                passed = (captured and host.get("pass") is True and words.get("match") is True
+                          and check.get("pass") is True and check.get("case") == case
+                          and check.get("seed") == args.seed)
+                report["cases"][case] = {
+                    "inputs": inputs, "host": host, "comparison": words,
+                    "ila_file": f"{case}.ila" if captured else None,
+                    "ila_check": check, "samples_csv": read_text(folder / "precision.csv"),
+                    "pass": passed,
+                }
+                if passed:
+                    print(f"FPGA PASS {case}: {check['actual_hex']} ({check['actual']}) "
+                          f"matches the host and Golden, write cycle {check['write_cycle']}", flush=True)
+            passed = not completed.returncode and all(item["pass"] for item in report["cases"].values())
+            different = any(item["comparison"].get("match") is False
+                            or item["ila_check"].get("pass") is False for item in report["cases"].values())
+            report.update(status="PASS" if passed else "FAIL_CAPTURE", **{"pass": bool(passed)},
+                          result="same" if passed else "different" if different else "incomplete")
+            if not passed:
+                report["error"] = "Incomplete or failed precision capture; see cases and vivado_log"
+    except (OSError, RuntimeError, ValueError) as error:
+        report.update(status="FAIL_CAPTURE", error=f"{type(error).__name__}: {error}")
+    finally:
+        write_result(run_dir, report)
+    if not report["pass"]:
+        print(f"Precision test failed: {report['error']}", file=sys.stderr)
+        return 1
     return open_precision_waveforms(vivado, run_dir, cases)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--case", "--mode", choices=(*CASES, "both"), default="both")
-    parser.add_argument("--run-dir", type=Path)
+    parser.add_argument("--seed", type=int,
+                        help="Generate reproducible nonzero random operands for INT8/INT16; "
+                             "omit to use the fixed waveform examples")
+    parser.add_argument("--run-dir", type=Path, help="Output directory; replace this test's existing result files")
     execution = parser.add_mutually_exclusive_group()
     execution.add_argument("--prepare-only", action="store_true")
     execution.add_argument("--view-only", type=Path, metavar="CAPTURE_DIR",
@@ -177,25 +218,36 @@ def main() -> int:
     parser.add_argument("--quiet-xdma", action="store_true")
     args = parser.parse_args()
 
+    if args.seed is not None and args.seed < 0:
+        parser.error("--seed must be a non-negative integer.")
+    if args.seed is not None and args.case == "int16-high":
+        parser.error("int16-high is a fixed overflow case; omit --seed.")
     if not args.prepare_only and os.name != "nt":
         parser.error("Board execution requires Windows and the XDMA driver.")
     if args.xdma_only and (args.case == "both" or args.run_dir is None):
         parser.error("The XDMA worker requires one case and a new run directory.")
     cases = ("int8", "int16") if args.case == "both" else (args.case,)
     out = ROOT / "test/precision/output"
-    run_dir = (args.run_dir or out / f"{args.case}_{datetime.now():%Y%m%d_%H%M%S_%f}").resolve()
+    if args.prepare_only:
+        out = ROOT / "test/precision/cached/prepared"
+    run_dir = (args.run_dir or out / timestamp()).resolve()
 
     try:
         if args.view_only:
-            return open_precision_waveforms(find_vivado(args.vivado), args.view_only.resolve(), cases)
+            view_dir = args.view_only.resolve()
+            if args.case == "both":
+                saved = load_json(view_dir / "result.json")
+                available = tuple(case for case in saved.get("cases", {}) if (view_dir / f"{case}.ila").is_file())
+                cases = available or cases
+            return open_precision_waveforms(find_vivado(args.vivado), view_dir, cases)
         if args.xdma_only:
-            return run_xdma(args.case, run_dir, args.timeout_s, args.quiet_xdma)
+            return run_xdma(args.case, run_dir, args.timeout_s, args.quiet_xdma, args.seed)
         if args.prepare_only:
             if len(cases) > 1:
                 run_dir.mkdir(parents=True, exist_ok=False)
             for case in cases:
                 folder = run_dir / case if len(cases) > 1 else run_dir
-                prepare_case(case, folder)
+                prepare_case(case, folder, args.seed)
                 print(f"Prepared {case}: {folder}")
             return 0
         return capture_on_board(args, cases, run_dir)
