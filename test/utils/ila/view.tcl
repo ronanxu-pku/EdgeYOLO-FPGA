@@ -12,8 +12,23 @@ if {[catch {
         }
         source [file join [file dirname [info script]] ila_common.tcl]
         set displayConfig [file join $root peak_int8_display.wcfg]
-        set bounds [prepare_tops_view $archive $config $displayConfig]
+        copy_tops_view_config $config $displayConfig
         display_hw_ila_data -wcfg $displayConfig $data
+        if {[catch {show_tops_clock} clockError]} {
+            dcim_progress "Clock reference unavailable: $clockError"
+        }
+        if {[catch {tops_archive_window $archive} bounds]} {
+            dcim_progress "Could not read ILA samples: $bounds"
+            set bounds {}
+            if {[info exists ::env(DCIM_TOPS_VIEW_WINDOW)]} {
+                # The host already verified all 16 output periods; take the first eight.
+                lassign $::env(DCIM_TOPS_VIEW_WINDOW) first last
+                if {[string is integer -strict $first] && [string is integer -strict $last]
+                    && $first >= 0 && $last - $first == 32} {
+                    set bounds [list $first [expr {$first + 16}]]
+                }
+            }
+        }
         set exporting [expr {[info exists ::env(DCIM_TOPS_SAVE_MARKERS)] && [info exists ::env(DCIM_TOPS_VIEW_WINDOW)]}]
         if {[llength $bounds]} {
             lassign $bounds start end

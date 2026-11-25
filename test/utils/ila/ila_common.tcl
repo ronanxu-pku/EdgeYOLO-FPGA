@@ -10,17 +10,31 @@ proc mark_tops_output_window {start end} {
     add_wave_marker -into $config -name OUT16_END $end fs
 }
 
+# Vivado writes numeric rows without quotes; probe names may be quoted CSV.
+proc tops_csv_fields {line} {
+    set line [string trimright $line "\r"]
+    if {[string first {"} $line] < 0} { return [split $line ,] }
+    set fields {}
+    foreach token [regexp -all -inline {(?:"(?:[^"]|"")*"|[^,"]*),} "$line,"] {
+        set value [string range $token 0 end-1]
+        if {[string index $value 0] eq {"}} {
+            set value [string map [list {""} {"}] [string range $value 1 end-1]]
+        }
+        lappend fields $value
+    }
+    return $fields
+}
+
 # One INT8 job is written every two samples. The ninth write closes the
 # half-open window containing eight jobs. Check all three stages on the trace.
 proc tops_eight_job_window {csvText} {
-    package require csv
-    set lines [split [string trim $csvText] "\n"]
+    set lines [split [string trimleft [string trim $csvText] "\uFEFF"] "\n"]
     set names {}
-    foreach name [csv::split [lindex $lines 0]] {
+    foreach name [tops_csv_fields [lindex $lines 0]] {
         set name [lindex [split [file tail [string trim $name]] "\["] 0]
         lappend names [regsub {^dcim_array_0_} $name {}]
     }
-    set radices [csv::split [lindex $lines 1]]
+    set radices [tops_csv_fields [lindex $lines 1]]
     set columns {}
     set fullValues {}
     foreach aliases {{peak_compute_mask issue_mask} {peak_ma_fire_mask ma_accept_mask} {peak_result_valid_mask write_done_mask}} {
@@ -45,7 +59,7 @@ proc tops_eight_job_window {csvText} {
     set active {}
     set writes {}
     foreach line [lrange $lines 2 end] {
-        set row [csv::split [string trim $line]]
+        set row [tops_csv_fields $line]
         set sample [lindex $row $sampleCol]
         if {![string is integer -strict $sample] || $sample != [llength $active]} { return {} }
         set masks {}
@@ -69,48 +83,49 @@ proc tops_eight_job_window {csvText} {
     return {}
 }
 
-# Work on the viewer's WCFG copy. Preserve unrelated markers and probes.
-proc prepare_tops_view {archive viewConfig destination} {
-    package require zipfile::decode
-    package require tdom
+# Remove only our native marker tags in the viewer's WCFG copy.
+proc copy_tops_view_config {viewConfig destination} {
+    set input [open $viewConfig r]
+    try {
+        fconfigure $input -encoding utf-8
+        set config [read $input]
+    } finally { close $input }
+    regsub -all {<marker\s[^<>]*?\mlabel\s*=\s*(?:"OUT(?:8|16)_(?:START|END)"|'OUT(?:8|16)_(?:START|END)')[^<>]*(?:/>|>\s*</marker\s*>)} $config {} config
+    set out [open $destination w]
+    try {
+        fconfigure $out -encoding utf-8
+        puts -nonewline $out $config
+    } finally { close $out }
+}
+
+proc tops_archive_window {archive} {
+    if {[catch {package require zipfile::decode}]} {
+        # Windows ships bsdtar, which can read Vivado's ZIP-based ILA archive.
+        return [tops_eight_job_window [exec tar -xOf $archive waveform.csv]]
+    }
     zipfile::decode::open $archive
     try {
         set zip [zipfile::decode::archive]
-        set native [lindex [lsearch -all -inline -glob [zipfile::decode::files $zip] *.wcfg] 0]
-        set original [dom parse [zipfile::decode::getfile $zip $native]]
-        set bounds {}
         if {[zipfile::decode::hasfile $zip waveform.csv]} {
-            set bounds [tops_eight_job_window [zipfile::decode::getfile $zip waveform.csv]]
+            return [tops_eight_job_window [zipfile::decode::getfile $zip waveform.csv]]
         }
     } finally { zipfile::decode::close }
+    return {}
+}
 
-    set input [open $viewConfig r]
-    try {set view [dom parse -channel $input]} finally {close $input}
-    try {
-        set root [$view documentElement]
-        foreach old [$root selectNodes {wave_markers/marker[@label="OUT16_START" or @label="OUT16_END" or @label="OUT8_START" or @label="OUT8_END"]}] {
-            $old delete
-        }
-        set clkPath {wvobject[contains(@fp_name,"peak_clk_toggle")]}
-        set clock [$root selectNodes $clkPath]
-        if {![llength $clock]} {
-            set originalClock [[$original documentElement] selectNodes $clkPath]
-            if {[llength $originalClock]} {
-                $root appendXML [[lindex $originalClock 0] asXML]
-                set clock [$root selectNodes $clkPath]
-            }
-        }
-        if {[llength $clock]} {
-            set first [$root selectNodes {wvobject[1]}]
-            if {$clock ne $first} { $root insertBefore [lindex $clock 0] $first }
-            foreach size [$root selectNodes WVObjectSize] {
-                $size setAttribute size [llength [$root selectNodes wvobject]]
-            }
-        }
-        set out [open $destination w]
-        try {puts $out [$view asXML]} finally {close $out}
-    } finally { $view delete; $original delete }
-    return $bounds
+proc show_tops_clock {} {
+    set first [lindex [get_waves -quiet *] 0]
+    if {$first eq ""} return
+    set clock [lindex [get_waves -quiet *peak_clk_toggle] 0]
+    if {$clock ne ""} {
+        if {$clock ne $first} { move_wave -before_wave $first $clock }
+        return
+    }
+    # The clock toggle and compute mask are siblings in the instrumented RTL.
+    set mask [lindex [get_waves -quiet *peak_compute_mask*] 0]
+    if {[regsub {peak_compute_mask(\[.*\])?$} $mask peak_clk_toggle path]} {
+        add_wave -quiet -before_wave $first $path
+    }
 }
 
 # Vivado sets its own Python environment. XDMA uses the host interpreter.
