@@ -384,6 +384,7 @@ def run_one_shot_fpga(
     import one_shot_host_head
     compare_ok = True
     compare_exc: BaseException | None = None
+    comparison = {"atol": compare_atol, "layout": "HWC, row-major", "outputs": {}}
     scratch_root = CACHE_DIR / "intermediate"
     scratch_root.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="case_", dir=scratch_root) as scratch:
@@ -430,6 +431,7 @@ def run_one_shot_fpga(
                     parsed_dir=resnet_parsed_dir,
                     golden_cache_dir=CACHE_DIR / "golden_cache",
                     golden_mode="compute",
+                    output_report=comparison["outputs"],
                 )
             except RuntimeError as exc:
                 compare_ok = False
@@ -448,6 +450,7 @@ def run_one_shot_fpga(
         timing = json.loads(timing_json.read_text()) if batch else {}
 
         result = _prediction_result(network, precision, img_path, head, compare_ok, conf)
+        result["comparison"] = comparison
         detections = list(result.get("detections", []))
         staged = work / "result"
         staged.mkdir()
@@ -455,9 +458,9 @@ def run_one_shot_fpga(
             _draw_yolo_detections(img_path, detections, staged / result_img.name)
         else:
             _draw_resnet_classification(img_path, list(result.get("topk", [])), staged / result_img.name)
-        (staged / result_json.name).write_text(
-            json.dumps(result, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-        )
+        with (staged / result_json.name).open("w", encoding="utf-8") as stream:
+            json.dump(result, stream, indent=2, ensure_ascii=False)
+            stream.write("\n")
         out_dir.mkdir(parents=True, exist_ok=True)
         (staged / result_img.name).rename(result_img)
         (staged / result_json.name).rename(result_json)

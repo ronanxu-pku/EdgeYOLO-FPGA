@@ -3,6 +3,13 @@ proc dcim_progress {message} {
     flush stdout
 }
 
+# Native ILA waveform time is one fs per sample index.
+proc mark_tops_output_window {start end} {
+    set config [current_wave_config]
+    add_wave_marker -into $config -name OUT16_START $start fs
+    add_wave_marker -into $config -name OUT16_END $end fs
+}
+
 # Vivado sets its own Python environment. XDMA uses the host interpreter.
 proc run_dcim_host_python {python args} {
     set original [dict create]

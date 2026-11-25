@@ -12,6 +12,7 @@ import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
+import xml.etree.ElementTree as ET
 from zipfile import ZipFile
 
 import numpy as np
@@ -101,7 +102,10 @@ def tops_fixture(folder, *, corrupt_tile=False, host_fail=False):
                 if corrupt_tile and sample == 48:
                     row["peak_tile7_result_ch0"] = 1
             writer.writerow([sample, *[f"{row[name]:X}" for name in names]])
-    (folder / "peak_int8.ila").write_bytes(b"offline tops capture")
+    with ZipFile(folder / "peak_int8.ila", "w") as archive:
+        archive.writestr("native.wcfg", '<wave_config><wvobject fp_name="issue_mask"/></wave_config>')
+        archive.writestr("waveform.wdb", b"original samples")
+        archive.write(folder / "peak_int8.csv", "waveform.csv")
 
 
 class CaptureResultTest(unittest.TestCase):
@@ -129,6 +133,13 @@ class CaptureResultTest(unittest.TestCase):
 
     def tops_run(self, *, corrupt_tile=False, host_fail=False, returncode=0):
         def capture(vivado, script, cwd, env, mode):
+            if script.name == "view.tcl":
+                self.assertTrue((self.output / "result.json").is_file())
+                self.assertEqual(env["DCIM_TOPS_VIEW_WINDOW"], "48 80")
+                (cwd / "marked.wcfg").write_text(
+                    '<wave_config><wave_markers><marker time="48" label="OUT16_START"/>'
+                    '<marker time="80" label="OUT16_END"/></wave_markers></wave_config>')
+                return subprocess.CompletedProcess([], 0, "offline marker log")
             tops_fixture(Path(env["DCIM_TOPS_CAPTURE_ROOT"]), corrupt_tile=corrupt_tile, host_fail=host_fail)
             return subprocess.CompletedProcess([], returncode, "offline tops log")
         with patch.object(tops, "find_vivado", return_value="mock"), \
@@ -145,6 +156,7 @@ class CaptureResultTest(unittest.TestCase):
         item = report["cases"]["int8"]
         self.assertTrue(report["pass"])
         self.assertEqual(item["ila_check"]["actual"], -10137)
+        self.assertEqual(item["comparison"]["channel0"], {"fpga_signed": -10137, "golden_signed": -10137})
         self.assertEqual(item["comparison"]["fpga_words_hex"], item["comparison"]["golden_words_hex"])
         self.assertTrue(item["samples_csv"])
         self.assertEqual({p.name for p in self.output.iterdir()}, {"int8.ila", "result.json"})
@@ -164,6 +176,8 @@ class CaptureResultTest(unittest.TestCase):
         item = report["cases"]["int8"]
         self.assertEqual(report["result"], "different")
         self.assertEqual(item["comparison"]["mismatched_word_indices"], [0])
+        self.assertNotEqual(item["comparison"]["channel0"]["fpga_signed"],
+                            item["comparison"]["channel0"]["golden_signed"])
         self.assertFalse(item["ila_check"]["pass"])
         self.assertTrue((self.output / "int8.ila").is_file())
 
@@ -178,6 +192,17 @@ class CaptureResultTest(unittest.TestCase):
         self.assertEqual(len(report["comparison"]["fpga_words_hex"]), 2048)
         self.assertEqual(report["ila_capture"]["all_tile_ch0_results_checked"], 512)
         self.assertEqual(report["calculated_peak_tops"], 2.048)
+        self.assertNotIn("output_window", report)
+        self.assertNotIn("output_window", report["ila_capture"])
+        self.assertEqual(report["operations"], 1048576)
+        self.assertEqual(report["ila_active_cycles"], 128)
+        self.assertEqual(report["vivado_log"], "offline tops log")
+        self.assertIn("262,144 OP in 32 cycles (128 ns at 250 MHz), 2.048 TOPS", self.stdout.getvalue())
+        with ZipFile(self.output / "peak_int8.ila") as archive:
+            self.assertEqual(archive.read("waveform.wdb"), b"original samples")
+            markers = ET.fromstring(archive.read("native.wcfg")).findall("wave_markers/marker")
+            self.assertEqual([(m.get("label"), m.get("time")) for m in markers],
+                             [("OUT16_START", "48"), ("OUT16_END", "80")])
         self.assertEqual({p.name for p in self.output.iterdir()}, {"result.json", "peak_int8.ila"})
         self.assertIn(f"result dir: {self.output.resolve()}", self.stdout.getvalue())
 
@@ -188,6 +213,17 @@ class CaptureResultTest(unittest.TestCase):
         self.assertFalse(report["pass"])
         self.assertIn("Tile 7", report["error"])
         self.assertTrue(report["samples_csv"])
+
+    def test_output_window_needs_both_boundaries_and_full_pipeline_overlap(self):
+        issues = [(s,) for s in range(100)]
+        ma = [(s,) for s in range(100) if s != 13]
+        writes = [(s,) for s in range(10, 66, 2)]
+        window = verify_peak.output_window(False, (issues, ma, writes))
+        self.assertEqual((window["start_sample"], window["end_sample_exclusive"]), (14, 46))
+        with self.assertRaisesRegex(ValueError, "16 consecutive"):
+            verify_peak.output_window(False, (issues, ma, writes[-16:]))
+        with self.assertRaisesRegex(ValueError, "Tile 0 alone"):
+            verify_peak.output_window(True, (issues, writes))
 
     def test_tops_host_mismatch_is_saved_in_json(self):
         self.assertEqual(self.tops_run(host_fail=True), 1)

@@ -39,6 +39,7 @@ ALL_TILE_VIEW = ("peak_compute_mask", "peak_ma_fire_mask", "peak_result_valid_ma
 JOB_COUNT = 64
 PHASE_COUNT = 2 * JOB_COUNT
 RESULT_WORDS = JOB_COUNT * 8 * 4
+WINDOW_BATCHES = 16
 
 
 def read_events(path: Path):
@@ -87,6 +88,23 @@ def read_events(path: Path):
                     raise ValueError(f"{mask_name}=0x{mask:02X} at sample {sample}, expected all 8 Tile bits")
             sample += 1
     return boardref, events
+
+
+def output_window(boardref, events):
+    """First 16 full write periods that overlap continuous all-Tile issue and MA."""
+    if boardref and len(events) != 4:
+        raise ValueError("The output window requires all-Tile MA and write masks; Tile 0 alone is insufficient")
+    issues, columns, writes = events[0], events[-2], events[-1]
+    busy = {row[0] for row in issues} & {row[0] for row in columns}
+    pulses = [row[0] for row in writes]
+    for index, end in enumerate(pulses[WINDOW_BATCHES:]):
+        start = pulses[index]
+        # The 17th write closes the interval but belongs to the next batch.
+        if (pulses[index:index + WINDOW_BATCHES + 1] == list(range(start, start + 2 * WINDOW_BATCHES + 1, 2))
+                and all(sample in busy for sample in range(start, end))):
+            return {"start_sample": start, "end_sample_exclusive": end, "cycles": end - start,
+                    "batches": WINDOW_BATCHES}
+    raise ValueError("No 16 consecutive full-pipeline output periods in the ILA capture")
 
 
 def verify_boardref(issues, writes, folder: Path) -> dict:

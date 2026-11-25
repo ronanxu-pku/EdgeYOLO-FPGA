@@ -10,6 +10,7 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import math
 import sys
 import time
 from pathlib import Path
@@ -459,6 +460,10 @@ def _stats(got: np.ndarray, ref: np.ndarray) -> dict[str, float]:
     }
 
 
+def _json_values(tensor: np.ndarray) -> list:
+    return [value if math.isfinite(value) else None for value in tensor.ravel().tolist()]
+
+
 def compute_golden_refs(
     build_dir: Path,
     image: Path,
@@ -555,6 +560,7 @@ def compare(
     golden_cache_dir: str | Path | None = None,
     refs: tuple[np.ndarray, dict[str, np.ndarray]] | None = None,
     golden_mode: str = "auto",
+    output_report: dict | None = None,
 ) -> bool:
     build_dir = Path(build_dir)
     plan = json.loads((build_dir / "plan.json").read_text())
@@ -573,17 +579,31 @@ def compare(
     else:
         primary_ref, named_refs = refs
 
+    def compare_output(name, path, shape, dtype, ref):
+        got = _read_blob(path, shape, dtype)
+        if got.shape != ref.shape:
+            raise ValueError(f"{name}: FPGA shape {got.shape} does not match Golden shape {ref.shape}")
+        stats = _stats(got, ref)
+        print(f"{name} max_abs={stats['max_abs']:.6g} mean_abs={stats['mean_abs']:.6g} "
+              f"rmse={stats['rmse']:.6g}")
+        match = stats["max_abs"] <= atol
+        if output_report is not None:
+            output_report[name] = {
+                "shape": list(shape), "fpga_dtype": dtype, "match": match,
+                **{key: value if math.isfinite(value) else None for key, value in stats.items()},
+                "fpga_values": _json_values(got),
+                "golden_values": _json_values(ref),
+            }
+        return match
+
     failed = False
     compared = False
     if output:
         h, w = [int(x) for x in host["output_hw"]]
         c = int(host["output_c"])
         dtype = str(host.get("output_dtype", "float32"))
-        got = _read_blob(Path(output), (h, w, c), dtype)
         ref = named_refs.get(outputs[-1]["name"], primary_ref) if outputs else primary_ref
-        s = _stats(got, ref)
-        print(f"primary max_abs={s['max_abs']:.6g} mean_abs={s['mean_abs']:.6g} rmse={s['rmse']:.6g}")
-        failed |= s["max_abs"] > atol
+        failed |= not compare_output("primary", Path(output), (h, w, c), dtype, ref)
         compared = True
 
     if output_dir and outputs:
@@ -593,11 +613,7 @@ def compare(
             h, w = [int(x) for x in spec["hw"]]
             c = int(spec["c"])
             dtype = str(spec.get("dtype", host.get("output_dtype", "float32")))
-            got = _read_blob(out_dir / f"{name}.bin", (h, w, c), dtype)
-            ref = named_refs[name]
-            s = _stats(got, ref)
-            print(f"{name} max_abs={s['max_abs']:.6g} mean_abs={s['mean_abs']:.6g} rmse={s['rmse']:.6g}")
-            failed |= s["max_abs"] > atol
+            failed |= not compare_output(name, out_dir / f"{name}.bin", (h, w, c), dtype, named_refs[name])
             compared = True
 
     if not compared:

@@ -293,15 +293,28 @@ class PowerSampler:
 
 
 def open_peak_waveform(vivado: str, path: Path) -> int:
-    from fpga.verify_peak import ALL_TILE_VIEW, BOARDREF_PROBES, PROBES
+    from fpga.verify_peak import ALL_TILE_VIEW, BOARDREF_PROBES, PROBES, output_window, read_events
 
     if path.is_dir():
         path = path / "peak_int8.ila"
+    bounds = None
     with ZipFile(path) as archive:
         configs = [name for name in archive.namelist() if name.lower().endswith(".wcfg")]
         if len(configs) != 1:
             raise ValueError(f"Expected one native wave configuration in {path}")
         config = archive.read(configs[0])
+        marked = {m.get("label") for m in ET.fromstring(config).findall("wave_markers/marker")}
+        if not {"OUT16_START", "OUT16_END"} & marked and "waveform.csv" in archive.namelist():
+            # Archives saved before the markers were introduced can be annotated for display.
+            with tempfile.TemporaryDirectory() as scratch:
+                csv_path = Path(scratch) / "waveform.csv"
+                csv_path.write_bytes(archive.read("waveform.csv"))
+                try:
+                    segment = output_window(*read_events(csv_path))
+                    bounds = segment["start_sample"], segment["end_sample_exclusive"]
+                    print(f"16 output periods: samples [{bounds[0]}, {bounds[1]}), {segment['cycles']} cycles")
+                except ValueError as error:
+                    print(f"Opening original waveform without output-window markers: {error}", file=sys.stderr)
     probes = tuple(PROBES)
     if b"peak_compute_mask" in config:
         prefix = "dcim_array_0_" if b"dcim_array_0_peak_compute_mask" in config else ""
@@ -316,7 +329,66 @@ def open_peak_waveform(vivado: str, path: Path) -> int:
         last_write = report.get("ila_capture", {}).get("last_write_sample")
         if isinstance(last_write, int):
             last_sample = min(1023, max(last_sample, last_write + 4))
-    return open_native_waveforms(vivado, {"peak_int8": path}, probes, last_sample=last_sample)
+    return open_native_waveforms(vivado, {"peak_int8": path}, probes, last_sample=last_sample, output_window=bounds)
+
+
+def save_window_markers(capture: Path, config_path: Path, window: dict) -> None:
+    """Keep the hardware samples and original WCFG, importing only Vivado's two markers."""
+    expected = {"OUT16_START": str(window["start_sample"]), "OUT16_END": str(window["end_sample_exclusive"])}
+    markers = [m for m in ET.parse(config_path).findall("wave_markers/marker") if m.get("label") in expected]
+    if len(markers) != 2 or {m.get("label"): m.get("time") for m in markers} != expected:
+        raise ValueError("Vivado marker positions do not match the verified output window")
+    with tempfile.TemporaryDirectory(dir=capture.parent) as scratch:
+        marked = Path(scratch) / capture.name
+        with ZipFile(capture) as source, ZipFile(marked, "w") as dest:
+            configs = [name for name in source.namelist() if name.lower().endswith(".wcfg")]
+            if len(configs) != 1:
+                raise ValueError("Expected one wave configuration in the TOPS archive")
+            for entry in source.infolist():
+                data = source.read(entry)
+                if entry.filename == configs[0]:
+                    config = ET.fromstring(data)
+                    group = config.find("wave_markers")
+                    if group is None:
+                        group = ET.Element("wave_markers")
+                        first_wave = config.find("wvobject")
+                        index = list(config).index(first_wave) if first_wave is not None else len(config)
+                        config.insert(index, group)
+                    for old in group.findall("marker"):
+                        if old.get("label") in expected:
+                            group.remove(old)
+                    group.extend(markers)
+                    data = ET.tostring(config, encoding="utf-8", xml_declaration=True)
+                dest.writestr(entry, data)
+        marked.replace(capture)
+
+
+def mark_captured_window(vivado: str, capture: Path, frequency_mhz: float) -> None:
+    from fpga.verify_peak import output_window, read_events
+
+    with tempfile.TemporaryDirectory(prefix="dcim_tops_mark_") as scratch:
+        work = Path(scratch)
+        shutil.copyfile(capture, work / "peak_int8.ila")
+        with ZipFile(capture) as archive:
+            configs = [name for name in archive.namelist() if name.lower().endswith(".wcfg")]
+            if len(configs) != 1 or "waveform.csv" not in archive.namelist():
+                raise ValueError("The ILA archive needs its waveform and native configuration for marking")
+            (work / "peak_int8.wcfg").write_bytes(archive.read(configs[0]))
+            csv_path = work / "waveform.csv"
+            csv_path.write_bytes(archive.read("waveform.csv"))
+        window = output_window(*read_events(csv_path))
+        start, end = window["start_sample"], window["end_sample_exclusive"]
+        env = dict(os.environ, DCIM_PRECISION_VIEW_ROOT=str(work), DCIM_PRECISION_VIEW_CASES="peak_int8",
+                   DCIM_TOPS_VIEW_WINDOW=f"{start} {end}", DCIM_TOPS_SAVE_MARKERS="1")
+        marked = run_vivado(vivado, REPO_ROOT / "test/utils/ila/view.tcl", work, env, "batch")
+        if marked.returncode:
+            raise RuntimeError(read_text(work / "view_error.txt") or marked.stdout[-1000:])
+        save_window_markers(capture, work / "marked.wcfg", window)
+    operations = 2 * window["batches"] * MATRIX_K * MATRIX_N
+    cycles = window["cycles"]
+    throughput = calculate_tops(cycles, frequency_mhz, operations)
+    print(f"16-batch output window [{start}, {end}): {operations:,} OP in {cycles} cycles "
+          f"({cycles * 1000 / frequency_mhz:g} ns at {frequency_mhz:g} MHz), {throughput:.3f} TOPS")
 
 
 def capture_peak(args: argparse.Namespace) -> int:
@@ -377,6 +449,10 @@ def capture_peak(args: argparse.Namespace) -> int:
         return 1
     print(f"{report['status']} INT8: {evidence['host_words_matched']} words match, "
           f"{cycles} cycles @ {args.frequency_mhz:g} MHz, {tops:.3f} TOPS")
+    try:
+        mark_captured_window(vivado, capture, args.frequency_mhz)
+    except (OSError, RuntimeError, ValueError, BadZipFile, ET.ParseError) as error:
+        print(f"Could not mark the 16-batch output window: {error}", file=sys.stderr)
     view_result = open_peak_waveform(vivado, capture)
     return view_result or int(not report["meets_2tops"])
 

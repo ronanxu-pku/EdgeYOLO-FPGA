@@ -135,7 +135,8 @@ def capture_env(python: str, ltx: Path, server: str, target: str) -> dict[str, s
     return env
 
 
-def open_native_waveforms(vivado: str, captures: dict[str, Path], probes: tuple[str, ...], last_sample: int) -> int:
+def open_native_waveforms(vivado: str, captures: dict[str, Path], probes: tuple[str, ...], last_sample: int,
+                          *, output_window: tuple[int, int] | None = None) -> int:
     with tempfile.TemporaryDirectory(prefix="dcim_ila_view_", ignore_cleanup_errors=True) as scratch:
         work = Path(scratch)
         for name, path in captures.items():
@@ -144,6 +145,9 @@ def open_native_waveforms(vivado: str, captures: dict[str, Path], probes: tuple[
             native_wave_config(path, work / f"{name}.wcfg", probes, last_sample)
             shutil.copyfile(path, work / f"{name}.ila")
         env = dict(os.environ, DCIM_PRECISION_VIEW_CASES=" ".join(captures), DCIM_PRECISION_VIEW_ROOT=str(work))
+        env.pop("DCIM_TOPS_VIEW_WINDOW", None)
+        if output_window is not None:
+            env["DCIM_TOPS_VIEW_WINDOW"] = " ".join(map(str, output_window))
         script = Path(__file__).with_name("view.tcl")
         opened = run_vivado(vivado, script, Path(tempfile.gettempdir()), env, "gui")
         error_path = work / "view_error.txt"

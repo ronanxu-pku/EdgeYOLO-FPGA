@@ -164,7 +164,13 @@ def capture_on_board(args: argparse.Namespace, cases: tuple[str, ...], run_dir: 
                 inputs = load_json(folder / "case.json")
                 host = load_json(folder / "readback.json")
                 check = load_json(folder / "waveform_check.json")
-                words = readback_comparison(folder)
+                words = {
+                    "channel0": {
+                        "fpga_signed": host.get("actual"),
+                        "golden_signed": inputs.get("expected"),
+                    },
+                    **readback_comparison(folder),
+                }
                 archive = folder / "capture.ila"
                 captured = archive.is_file() and archive.stat().st_size > 0
                 if captured:

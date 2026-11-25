@@ -85,6 +85,10 @@ Precision 在 `cases.int8`、`cases.int16` 或 `cases.int16-high` 内分别保�
 - `ila_file`、`ila_check`：ILA 文件名、ILA 写回值、周期和逐级校验结论。
 - `samples_csv`：本轮原始采样 CSV 文本；不再单独输出 CSV 文件。
 
+在同一个 `result.json` 的 `cases.int8` 或 `cases.int16` 中，`comparison.channel0`
+并列显示 `fpga_signed` 与 `golden_signed`。核对完整回读时，按相同下标比较
+`comparison.fpga_words_hex` 与 `comparison.golden_words_hex`。
+
 TOPS 在顶层保存 `host_results`、`host_correctness_pass`、`comparison`、`ila_file`、
 `samples_csv`、`ila_capture`，以及矩阵尺寸、操作数、时钟、周期数和 TOPS。
 `comparison.fpga_words_hex` 与 `comparison.golden_words_hex` 按相同顺序逐项对应，
@@ -113,7 +117,10 @@ python .\test\network\run.py --model all --precision both --num 20
 `result_<图片编号>.png` 和 `result_<图片编号>.json`，不再逐图创建子目录。
 YOLO 的图片编号使用 COCO 原图 ID（例如 `result_139.png/json`），ResNet 使用图片清单中的序号，均不补前导零。
 单图与批量运行都会打印完整输出目录；选择 `all` 或 `both` 时，不同模型和精度分别保存。
-JSON 保存预测结果、置信度/得分、检测框，以及 FPGA 特征与主机参考结果是否一致。
+JSON 保存预测结果、置信度/得分、检测框，以及 FPGA 回读和软件参考输出的完整特征值。
+人工核对时，在同一个 `result_<图片编号>.json` 的 `comparison.outputs` 中选择输出名称，
+按相同下标比较 `fpga_values` 与 `golden_values`。两个数组按 HWC 顺序展开，通道维变化最快。
+每组同时记录张量形状、FPGA 原始数据类型、最大绝对误差和是否通过，`comparison.atol` 记录比对阈值。
 YOLO 的框使用原图像素坐标 `xyxy`；ResNet 的得分是 logit，不是概率。
 
 编译缓存缺失时自动编译。主机参考值在 FPGA 执行后计算并校验。
@@ -165,9 +172,13 @@ python .\test\tops\run.py --view-only "<peak_int8.ila 的完整路径>"
 脚本先启动 ILA，再通过 XDMA 发一轮 64-job 任务，校验全部 2,048 个 128-bit 结果字，
 并核对 8 个 Tile 的输入/MA/写回有效掩码及 512 个通道 0 的 ILA 结果。
 
-周期从第一个有效输入到最后一个有效输入计算（包含两端），默认 250 MHz。
-若本轮验证得到连续 128 拍，窗口为 512 ns，峰值为 `2.048 TOPS`。
-该值只计计算输入窗口；数据传输、装载和后续排空不计入峰值。
+自动采样取第一个满足条件的连续 16 批输出窗口。8 个 Tile 的输入和乘加在窗口内每拍均有效，
+全 Tile 写回掩码每两拍为 0xFF。Tcl 将首个写回脉冲标为 `OUT16_START`，第 17 个脉冲
+标为 `OUT16_END`（右端不计入），标记随 `peak_int8.ila` 保存。
+用 `--view-only` 打开旧版 ILA 时，若归档中含完整探针和采样 CSV，查看器会为该视图补上标记。
+终端的 `16-batch output window` 一行显示起止样点、操作数、周期数、耗时和区间算力。
+16 批对应 2 × 16 × 64 × 128 = 262,144 次操作。若两标记相差 32 拍，250 MHz 下历时 128 ns，区间算力为 2.048 TOPS。
+`result.json` 中的 `calculated_peak_tops` 沿用整轮口径，用整轮操作数 `operations`、时钟 `frequency_mhz` 和首个至末个有效输入拍（含首尾）的周期数 `ila_active_cycles` 计算。
 `result: same` 表示数据校验一致，`status: PASS` 还要求峰值不低于 2 TOPS。
 仅主机比对通过不足以形成自动 ILA 验证的 TOPS 结论。
 

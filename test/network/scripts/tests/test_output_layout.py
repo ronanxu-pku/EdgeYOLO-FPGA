@@ -9,29 +9,43 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import numpy as np
+
 NETWORK_DIR = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location("network_entry", NETWORK_DIR / "run.py")
 entry = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(entry)
+spec = importlib.util.spec_from_file_location("compare_one_shot", NETWORK_DIR / "scripts/golden/compare_one_shot.py")
+comparator = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(comparator)
 
 
 class OutputLayoutTest(unittest.TestCase):
     def test_cli_saves_all_image_pairs_in_one_batch_directory(self):
-        for count in (1, 20):
-            with self.subTest(count=count), tempfile.TemporaryDirectory() as temp:
+        for count, difference in ((1, 0), (20, 0), (1, 1)):
+            with self.subTest(count=count, difference=difference), tempfile.TemporaryDirectory() as temp:
                 root = Path(temp)
                 build = root / "build"
                 build.mkdir()
-                (build / "plan.json").write_text('{"host_io": {"outputs": []}}')
+                (build / "plan.json").write_text(json.dumps({"host_io": {
+                    "output_hw": [1, 1], "output_c": 2,
+                    "outputs": [{"name": "PAN_P3", "hw": [1, 1], "c": 2}],
+                }}))
+                expected = np.array([[[1, 2]]], dtype=np.float32)
+                actual = np.array([[[1, 2 + difference]]], dtype=np.float32)
                 session = Mock()
                 session.prepare_input.return_value = b"test input"
-                session.run.side_effect = lambda _input, _output, _features, timing, **kw: (
+
+                def readback(_input, output, features, timing, **kwargs):
+                    actual.tofile(output)
+                    actual.tofile(features / "PAN_P3.bin")
                     timing.write_text('{}')
-                )
+
+                session.run.side_effect = readback
                 hardware = SimpleNamespace(HardwareSession=Mock(return_value=session))
                 modules = {
                     "hw_runner_win": hardware,
-                    "compare_one_shot": SimpleNamespace(compare=Mock()),
+                    "compare_one_shot": comparator,
                     "one_shot_host_head": SimpleNamespace(run_head=Mock(return_value={
                         "network": "yolov5n", "detections": [],
                     })),
@@ -45,11 +59,13 @@ class OutputLayoutTest(unittest.TestCase):
                         _ensure_one_shot_artifact=Mock(),
                     ))
                     stack.enter_context(patch.dict(sys.modules, modules))
+                    stack.enter_context(patch.object(comparator, "compute_golden_refs",
+                                                     return_value=(expected, {"PAN_P3": expected})))
                     stack.enter_context(patch.object(sys, "argv", [
                         "run.py", "--model", "yolo", "--precision", "int8", "--num", str(count),
                     ]))
                     stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
-                    self.assertEqual(entry.main(), 0)
+                    self.assertEqual(entry.main(), int(bool(difference)))
 
                 folders = list((root / "output").iterdir())
                 self.assertEqual(len(folders), 1)
@@ -62,6 +78,12 @@ class OutputLayoutTest(unittest.TestCase):
                 for example in examples:
                     result = json.loads((folders[0] / f"result_{example['index']}.json").read_text())
                     self.assertEqual(result["image"], example["file"])
+                    output_comparison = result["comparison"]["outputs"]["PAN_P3"]
+                    self.assertEqual(output_comparison["shape"], [1, 1, 2])
+                    self.assertEqual(output_comparison["fpga_values"], [1, 2 + difference])
+                    self.assertEqual(output_comparison["golden_values"], [1, 2])
+                    self.assertEqual(output_comparison["max_abs"], difference)
+                    self.assertEqual(output_comparison["match"], difference == 0)
                 self.assertEqual(session.run.call_count, count)
                 hardware.HardwareSession.assert_called_once()
                 session.close.assert_called_once()
