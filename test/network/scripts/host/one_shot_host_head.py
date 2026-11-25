@@ -1,12 +1,10 @@
-"""Run host-side network heads from one-shot FPGA output features.
+"""Postprocess full-network FPGA prediction logits.
 
 Allowed host boundaries:
-  * YOLO: detect head + decode/NMS/postprocess.
-  * ResNet: final FC/FFN + softmax/top-k.
+  * detection_logits: YOLO decode/NMS/postprocess only.
+  * classification_logits: ResNet top-k only (ignore padded channels).
 
-The one-shot compiler exposes FP32 YOLO DQA features.  ResNet full-backbone
-plans may expose the final activation after an FPGA QA step (INT8/INT16),
-matching the older E2E host FC boundary.
+Backbone-only plans are rejected; neural prediction layers execute on FPGA.
 """
 from __future__ import annotations
 
@@ -84,7 +82,9 @@ def _safe_output_name(name: str) -> str:
 def _run_yolo(plan: dict, image_path: Path, output_dir: Path, parsed_dir: Path,
               conf: float, iou: float, expect_detections: int | None) -> dict:
     specs = {str(s["name"]): s for s in _output_specs(plan)}
-    required = ["PAN_P3", "PAN_P4", "PAN_P5"]
+    if plan["host_io"].get("boundary") != "detection_logits":
+        raise ValueError("YOLO requires FPGA Detect logits; recompile the full network")
+    required = [f"DETECT_P{i}" for i in (3, 4, 5)]
     missing = [name for name in required if name not in specs]
     if missing:
         raise ValueError(f"YOLO host head needs {required}, missing {missing} in plan host_io.outputs")
@@ -100,20 +100,13 @@ def _run_yolo(plan: dict, image_path: Path, output_dir: Path, parsed_dir: Path,
     img_rgb = unit_run.load_image(str(image_path))
     _q, ratio, (dw, dh), orig_shape = unit_run.preprocess_yolov5n(img_rgb)
 
-    head = DetectHead(str(parsed_dir / "weights"))
-    # The trained host detect head expects quantized PAN features.  The one-shot
-    # compiler exposes FP32 DQA features, so round them back to the per-scale
-    # activation grids before running model.24 on host.  Native W16A16 plans
-    # must retain the full INT16 grid here; clipping them to INT8 changes the
-    # model inputs and invalidates the host-side detect result.
-    mode = str(plan.get("mode", plan.get("compile_meta", {}).get("mode", "int8")))
-    quant_dtype = np.int16 if mode == "int16" else np.int8
-    quant_limit = 32767 if mode == "int16" else 127
-    feats_q = []
-    for i, feat in enumerate(feats):
-        scale = float(head.convs[i]["act_scale"])
-        feats_q.append(np.clip(np.round(feat / scale), -quant_limit, quant_limit).astype(quant_dtype))
-    raw_preds = head.forward(feats_q[0], feats_q[1], feats_q[2])
+    head = DetectHead(str(parsed_dir / "weights"), postprocess_only=True)
+    raw_preds = []
+    for name, feat in zip(required, feats):
+        valid_c = int(specs[name]["valid_c"])
+        if valid_c != head.out_channels:
+            raise ValueError(f"{name}: valid channels do not match the class count")
+        raw_preds.append(feat[..., :valid_c].reshape(*feat.shape[:2], 3, head.num_classes + 5))
     results = head.postprocess(raw_preds, conf_thres=conf, iou_thres=iou, img_size=320)
 
     if len(results) > 0:
@@ -181,15 +174,9 @@ def _run_resnet(plan: dict, image_path: Path, output: Path | None,
         raise ValueError("ResNet host head needs --output feature blob")
     feature = _read_tensor(output, (h, w, c), str(spec.get("dtype", "float32")))
 
-    fc = resnet_e2e.load_fc_from_parsed(parsed_dir) or resnet_e2e.load_fc_from_onnx()
-    last_scale_fn = getattr(resnet_e2e, "_last_act_scale", None)
-    last_scale = float(last_scale_fn(parsed_dir)) if last_scale_fn else 1.0
-    gap = feature.astype(np.float32).mean(axis=(0, 1)) * last_scale
-    if fc is None:
-        logits = gap
-    else:
-        weight, bias = fc
-        logits = gap @ weight + bias if weight.shape[0] == gap.shape[0] else gap @ weight.T + bias
+    if plan["host_io"].get("boundary") != "classification_logits":
+        raise ValueError("ResNet requires FPGA GAP/FC logits; recompile the full network")
+    logits = feature.reshape(-1)[:int(plan["host_io"]["valid_c"])]
     logits = logits.astype(np.float32)
     order = np.argsort(logits)[-topk:][::-1]
     labels = resnet_e2e.CLASS_NAMES
@@ -237,7 +224,7 @@ def run_head(
 
     if "yolo" in network_name:
         if not output_dir:
-            raise RuntimeError("YOLO host head needs output_dir with PAN_P3/PAN_P4/PAN_P5 blobs")
+            raise RuntimeError("YOLO postprocessing needs output_dir with DETECT_P3/DETECT_P4/DETECT_P5 logits")
         result = _run_yolo(
             plan, Path(image), Path(output_dir),
             Path(yolo_parsed_dir) if yolo_parsed_dir else REPO / "project" / "project" / "model" / "yolov5n" / "parsed",
@@ -265,12 +252,12 @@ def run_head(
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Run allowed host head from one-shot FPGA features")
+    ap = argparse.ArgumentParser(description="Postprocess one-shot FPGA prediction logits")
     ap.add_argument("--build-dir", required=True)
     ap.add_argument("--image", required=True)
     ap.add_argument("--network", choices=["auto", "yolov5n", "resnet18"], default="auto")
-    ap.add_argument("--output", default=None, help="primary output feature blob")
-    ap.add_argument("--output-dir", default=None, help="named output feature directory")
+    ap.add_argument("--output", default=None, help="primary FPGA logit blob")
+    ap.add_argument("--output-dir", default=None, help="named FPGA logit directory")
     ap.add_argument("--json-out", default=None)
     ap.add_argument("--conf", type=float, default=0.25)
     ap.add_argument("--iou", type=float, default=0.45)

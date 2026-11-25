@@ -637,6 +637,44 @@
       "act_scale": 0.125,
       "act_zero_point": 0.0,
       "input_act_scale": 0.0625
+    },
+    {
+      "name": "fc",
+      "type": "conv",
+      "in_channels": 512,
+      "out_channels": 1008,
+      "kernel_h": 1,
+      "kernel_w": 1,
+      "stride": [
+        1,
+        1
+      ],
+      "padding": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "group": 1,
+      "weight_shape": [
+        1008,
+        1,
+        1,
+        512
+      ],
+      "has_bn": false,
+      "has_activation": false,
+      "input_act_scale": 0.125,
+      "in_act_zero_point": 0.0
     }
-  ]
+  ],
+  "prediction_head": {
+    "version": 1,
+    "kind": "resnet_gap_fc",
+    "layer": "fc",
+    "valid_c": 1000,
+    "input_act_scale": 0.125,
+    "gap_quantization": "round(sum_fp32 / (H*W*input_act_scale))",
+    "weight_scale": 0.00390625
+  }
 }

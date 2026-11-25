@@ -120,6 +120,9 @@ def parse_export(quant_onnx: Path, fp_onnx: Path, out_dir: Path, *, mode: str) -
 
     template = json.loads(NETWORK_TEMPLATE.read_text())
     net = json.loads(json.dumps(template))
+    # Rebuild prediction layers from the selected ONNX, including on re-export.
+    head_names = {head["layer"] for head in net.pop("prediction_head", {}).get("heads", [])}
+    net["layers"] = [layer for layer in net["layers"] if layer["name"] not in head_names]
     widened_int16 = mode == INT16_WIDENED_MODE
     int16_storage = mode in {"int16", INT16_WIDENED_MODE}
     net["model"] = f"yolov5n-coco50k-qat-{mode.replace('_', '-')}"
@@ -191,26 +194,45 @@ def parse_export(quant_onnx: Path, fp_onnx: Path, out_dir: Path, *, mode: str) -
         act_scales[name] = act_scale
         prev_scale = act_scale
 
-    # Host detect head weights: 3 convs, no BN/ReLU after them.
-    for i in range(3):
-        name = f"model.24.m.{i}.conv"
-        spec = specs.get(name) or specs.get(f"model.24.m.{i}")
+    # Store FPGA OHWI weights and the existing host reference in the same NPZ.
+    heads = []
+    by_name = {layer["name"]: layer for layer in net["layers"]}
+    for i, feeder in enumerate((17, 20, 23)):
+        name = f"model.24.m.{i}"
+        spec = specs.get(name + ".conv") or specs.get(name)
         if not spec:
             missing.append(name)
             continue
         w = consts[spec["weight"]]
-        w_scale = consts[spec["scale"]].astype(np.float32).reshape(-1)
+        source_dtype = np.int16 if mode == "int16" else np.int8
+        if w.dtype != source_dtype or np.any(consts[spec["zero_point"]] != 0):
+            raise ValueError(f"{name}: expected symmetric {source_dtype.__name__} detect weights")
+        valid_c, cin = w.shape[:2]
+        padded_c = (valid_c + 15) // 16 * 16
+        pad = padded_c - valid_c
+        w_scale = np.broadcast_to(consts[spec["scale"]].reshape(-1), (valid_c,)).astype(np.float32)
+        act_scale = float(by_name[f"model.{feeder}.cv3.conv"]["act_scale"])
         weight_fp32 = w.astype(np.float32) * w_scale.reshape(-1, 1, 1, 1)
-        np.savez(
-            out_w / f"model_24_m_{i}.npz",
-            weight_fp32=weight_fp32.astype(np.float16),
-            bias=np.zeros((w.shape[0],), dtype=np.float32),
-            act_scale=np.array(HARD_QUANT_SCALE, dtype=np.float32),
-            weight_int8=w.astype(np.int16 if int16_storage else np.int8),
-            dqa_scale=np.zeros((w.shape[0],), dtype=np.float32),
-            dqa_bias=np.zeros((w.shape[0],), dtype=np.float32),
-            num_classes=np.array(80, dtype=np.int32),
+        bias = np.zeros(valid_c, dtype=np.float32)
+        weight = np.pad(w.transpose(0, 2, 3, 1), ((0, pad), (0, 0), (0, 0), (0, 0)))
+        np.savez_compressed(
+            out_w / f"{_safe(name)}.npz",
+            weight_fp32=weight_fp32.astype(np.float16), bias=bias,
+            weight_int8=weight.astype(np.int16 if int16_storage else np.int8),
+            weight_scale=np.pad(w_scale, (0, pad)),
+            weight_zero_point=np.array(0, np.int32), act_scale=np.float32(act_scale),
+            dqa_scale=np.pad(w_scale * np.float32(act_scale), (0, pad)),
+            dqa_bias=np.pad(bias, (0, pad)), num_classes=np.array(80, np.int32),
         )
+        net["layers"].append({
+            "name": name, "type": "conv", "in_channels": cin, "out_channels": padded_c,
+            "kernel_h": 1, "kernel_w": 1, "stride": [1, 1], "padding": [0, 0, 0, 0],
+            "group": 1, "weight_shape": [padded_c, 1, 1, cin], "has_bn": False,
+            "has_activation": False, "input_act_scale": act_scale, "in_act_zero_point": 0.0,
+        })
+        heads.append({"layer": name, "input": f"PAN_P{i + 3}",
+                      "output": f"DETECT_P{i + 3}", "valid_c": valid_c})
+    net["prediction_head"] = {"version": 1, "kind": "yolo_detect", "heads": heads}
 
     if missing:
         raise ValueError(f"missing tensors for {len(missing)} layers: {missing[:8]}")

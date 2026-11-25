@@ -323,7 +323,8 @@ def _lower_resnet18(
 
     def _do_conv(layer_idx, in_off, out_off, skip_qa=False,
                  override_h=None, override_w=None, override_c=None,
-                 qa_obuf_off=None, qa_input_scale: float | None = None):
+                 qa_obuf_off=None, qa_input_scale: float | None = None,
+                 output_qdq: bool = True):
         """Emit one conv, return (oh, ow, cout). Supports cout tiling."""
         nonlocal conv_idx, wb_scratch_cursor
         layer = layers[layer_idx]
@@ -421,11 +422,12 @@ def _lower_resnet18(
         if qa_tmp is not None:
             skip_alloc.free(qa_tmp[0], qa_tmp[1])
 
-        _emit_activation_qdq(
-            f"{layer['name']}.act_qdq",
-            out_off, oh, ow, cout,
-            float(layer["act_scale"]) if "act_scale" in layer else None,
-        )
+        if output_qdq:
+            _emit_activation_qdq(
+                f"{layer['name']}.act_qdq",
+                out_off, oh, ow, cout,
+                float(layer["act_scale"]) if "act_scale" in layer else None,
+            )
 
         layer_records.append({
             "name": layer["name"],
@@ -612,12 +614,25 @@ def _lower_resnet18(
         skip_alloc.reset()
         cur_scale = add_output_scales.get(add_name, cur_scale)
 
-    # Full ResNet host boundary is after the final residual Add.  The legacy E2E
-    # classifier expects that tensor in quantized activation domain, so add one
-    # final QA when all conv layers are present.  Intermediate Adds remain FP32;
-    # the following Conv's QA already quantizes them with the same scale.
+    # Extended models finish with MP sum -> QA mean -> linear DCIM FC. Legacy
+    # models without prediction-head metadata retain the final integer feature.
     host_output_dtype = "float32"
-    if conv_idx == len(layers):
+    head = network.get("prediction_head", {})
+    output_boundary = "backbone_features"
+    if head.get("kind") == "resnet_gap_fc" and conv_idx == 20 and n_conv > 20:
+        fc_idx = next(i for i, layer in enumerate(layers) if layer["name"] == head["layer"])
+        gap_off = skip_alloc.alloc(_tensor_bytes_nhwc(1, 1, cur_c, elem_bytes=4))
+        ops.extend(emit_maxpool(cur_obuf, gap_off, cur_h, cur_w, cur_c, mode=2))
+        # MP produces FP32 sums. QA folds 1/(H*W) into its scale; DQA uses
+        # the mean's activation scale, so FC bias is added exactly once.
+        sum_scale = cur_h * cur_w * float(head["input_act_scale"])
+        cur_h, cur_w, cur_c = _do_conv(
+            fc_idx, gap_off, R_PING, override_h=1, override_w=1,
+            qa_input_scale=sum_scale, output_qdq=False,
+        )
+        cur_obuf = R_PING
+        output_boundary = "classification_logits"
+    elif conv_idx == len(layers) and not head:
         final_scale = add_output_scales.get("layer4.1.Add")
         if final_scale is not None and final_scale != 0.0:
             final_name = "__resnet_final_qa"
@@ -666,7 +681,10 @@ def _lower_resnet18(
         "output_dtype": host_output_dtype,
         "output_hw": [cur_h, cur_w],
         "output_c": cur_c,
+        "boundary": output_boundary,
     }
+    if output_boundary == "classification_logits":
+        plan["host_io"]["valid_c"] = int(head["valid_c"])
     plan["compile_meta"] = {
         "schema_version": SCHEMA_VERSION, "mode": mode,
         "num_conv_layers_compiled": conv_idx,
@@ -684,7 +702,7 @@ def _lower_yolov5n(
     mode: str = "int8", max_layers: Optional[int] = None,
     dcim_loop: str = "layer",
 ) -> Dict[str, Any]:
-    """Lower YOLOv5n backbone + FPN/PAN using static schedule."""
+    """Lower YOLOv5n backbone/FPN/PAN and optional linear Detect convolutions."""
     from .yolov5n_schedule import YOLOV5N_SCHEDULE
 
     layers = network["layers"]
@@ -748,7 +766,8 @@ def _lower_yolov5n(
             skip_alloc.free(buf["off"], buf["size"])
         del named_buffers[name]
 
-    def _do_conv_yolo(layer_idx, skip_qa=False, persist_output=False):
+    def _do_conv_yolo(layer_idx, skip_qa=False, persist_output=False,
+                      output_off=None, qa_off=None):
         nonlocal cur_h, cur_w, cur_c, cur_obuf, conv_count, wb_scratch_cursor
 
         layer = layers[layer_idx]
@@ -776,12 +795,16 @@ def _lower_yolov5n(
         act_ibuf_word_addr = wei_ibuf_word_addr + (wt_per_tile_bytes // BYTES_PER_WORD)
 
         in_off = cur_obuf
-        if persist_output:
+        if output_off is not None:
+            out_off = int(output_off)
+        elif persist_output:
             out_off = skip_alloc.alloc(_tensor_bytes_nhwc(oh, ow, cout, elem_bytes=4))
         else:
             out_off = _other(cur_obuf)
         qa_scratch_tmp = None
         qa_scratch_off = _other(cur_obuf) if current_named_name is not None else None
+        if qa_off is not None:
+            qa_scratch_off = int(qa_off)
         if (not skip_qa) and qa_scratch_off is not None and int(qa_scratch_off) == int(out_off):
             qa_bytes = _tensor_bytes_nhwc(cur_h, cur_w, cin, elem_bytes=elem_bytes)
             qa_scratch_tmp = (skip_alloc.alloc(qa_bytes), qa_bytes)
@@ -958,6 +981,35 @@ def _lower_yolov5n(
         for n in to_free:
             _release_named_buffer(n)
 
+    head = network.get("prediction_head", {})
+    detect_outputs = []
+    if head.get("kind") == "yolo_detect" and all(
+        item["input"] in named_buffers for item in head["heads"]
+    ):
+        # Once the backbone is complete, PING/PONG are free. Store the three
+        # padded prediction tensors there; their sum exceeds the skip region.
+        output_cursor = PING
+        for item in head["heads"]:
+            if max_layers and conv_count >= max_layers:
+                break
+            buf = named_buffers[item["input"]]
+            cur_h, cur_w, cur_c, cur_obuf = buf["h"], buf["w"], buf["c"], buf["off"]
+            layer_idx = next(i for i, layer in enumerate(layers) if layer["name"] == item["layer"])
+            cout = int(layers[layer_idx]["out_channels"])
+            output_bytes = _tensor_bytes_nhwc(cur_h, cur_w, cout, elem_bytes=4)
+            if output_cursor + output_bytes > IM2COL:
+                raise OutOfBuffer("YOLO prediction outputs overlap im2col scratch")
+            qa_bytes = _tensor_bytes_nhwc(cur_h, cur_w, cur_c, elem_bytes=elem_bytes)
+            qa_off = skip_alloc.alloc(qa_bytes)
+            _do_conv_yolo(layer_idx, output_off=output_cursor, qa_off=qa_off)
+            skip_alloc.free(qa_off, qa_bytes)
+            _release_named_buffer(item["input"])
+            detect_outputs.append({
+                "name": item["output"], "obuf_off": output_cursor, "dtype": "float32",
+                "hw": [cur_h, cur_w], "c": cout, "valid_c": int(item["valid_c"]),
+            })
+            output_cursor += output_bytes
+
     ops.append({"kind": "end"})
 
     plan["ops"] = ops
@@ -973,9 +1025,8 @@ def _lower_yolov5n(
         cur_s = (cur_s + w["section_bytes"] + 15) & ~15
     plan["wb_layout"]["scratch_off_by_layer"] = scratch_off_by_layer
 
-    detect_outputs = []
     for name in ("PAN_P3", "PAN_P4", "PAN_P5"):
-        if name in named_buffers:
+        if not head and name in named_buffers:
             buf = named_buffers[name]
             detect_outputs.append({
                 "name": name,
@@ -992,6 +1043,7 @@ def _lower_yolov5n(
         "output_dtype": "float32",
         "output_hw": detect_outputs[-1]["hw"] if detect_outputs else [cur_h, cur_w],
         "output_c": detect_outputs[-1]["c"] if detect_outputs else cur_c,
+        "boundary": "detection_logits" if detect_outputs and head else "backbone_features",
     }
     if detect_outputs:
         plan["host_io"]["outputs"] = detect_outputs
@@ -999,7 +1051,7 @@ def _lower_yolov5n(
         "schema_version": SCHEMA_VERSION, "mode": mode,
         "num_conv_layers_compiled": conv_count,
         "num_conv_layers_total": len(layers),
-        "stop_reason": "yolov5n full schedule (to model.23)",
+        "stop_reason": "yolov5n detection logits" if detect_outputs and head else "yolov5n backbone schedule",
     }
     return plan
 
