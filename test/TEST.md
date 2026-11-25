@@ -117,14 +117,44 @@ python .\test\network\run.py --model all --precision both --num 20
 `result_<图片编号>.png` 和 `result_<图片编号>.json`，不再逐图创建子目录。
 YOLO 的图片编号使用 COCO 原图 ID（例如 `result_139.png/json`），ResNet 使用图片清单中的序号，均不补前导零。
 单图与批量运行都会打印完整输出目录；选择 `all` 或 `both` 时，不同模型和精度分别保存。
-JSON 保存预测结果、置信度/得分、检测框，以及 FPGA 回读和软件参考输出的完整特征值。
+JSON 保存预测结果、置信度/得分、检测框，以及 FPGA 回读和软件参考的完整输出值。
 人工核对时，在同一个 `result_<图片编号>.json` 的 `comparison.outputs` 中选择输出名称，
 按相同下标比较 `fpga_values` 与 `golden_values`。两个数组按 HWC 顺序展开，通道维变化最快。
 每组同时记录张量形状、FPGA 原始数据类型、最大绝对误差和是否通过，`comparison.atol` 记录比对阈值。
 YOLO 的框使用原图像素坐标 `xyxy`；ResNet 的得分是 logit，不是概率。
 
-编译缓存缺失时自动编译。主机参考值在 FPGA 执行后计算并校验。
-Detect head / NMS 以及 ResNet GAP / FC / Top-k 在主机执行。
+编译缓存缺失时自动编译。此次扩展使用 `cached/compiled/prediction_heads_v1/`，
+首次运行会重新编译，避免使用旧的主干输出程序。主机参考值在 FPGA 执行后计算并校验。
+
+`test-top-network-extend` 分支复用现有 RTL 与 `top.bit/top.ltx`，执行边界为：
+
+| 网络 | FPGA 尾部计算与回读 | 主机后处理 |
+| --- | --- | --- |
+| YOLOv5n | 三个无 ReLU 的 1×1 Detect 卷积；回读 `DETECT_P3/P4/P5` FP32 张量 | Sigmoid、坐标解码、阈值筛选、NMS |
+| ResNet-18 | GAP 求和、平均化量化和 FC；回读分类 logit | 取有效 1000 类并做 Top-k |
+
+YOLO 每像素 255 个有效通道补齐到 256；ResNet 的 1000 类补齐到 1008。
+补齐通道的权重、缩放与偏置全为零，主机按 `valid_c` 去除，校验会检查完整物理输出。
+YOLO Detect 复用原 QAT ONNX 的 INT8/INT16 权重及每通道尺度。
+ResNet FC 从已有 VAI 权重无损恢复 `2^-8` 整数网格；GAP 保留末段激活尺度 `0.125`，
+QA 使用 `1/(49×0.125)`，DQA 使用 `0.125×2^-8`，FC 偏置保持原值。
+当前 ResNet `--precision int16` 继续使用已有 INT8 扩位模型；YOLO INT16 为原生 W16A16。
+
+离线验证：四组程序编译通过；每组 20 张样例中，YOLO 检测数量与类别顺序、ResNet Top-1
+均与原主机尾部一致。GAP 新增舍入导致 ResNet logit 最大差异约 0.242。
+未修改的 GAP RTL 已通过 XSim + Xilinx 浮点 IP 仿真（7×7×512、1×1×8、3×5×12）。
+上述为离线验证；本分支的完整程序仍需上板确认。
+逐图结果与新增权重 SHA-256 见 [`prediction_heads_offline.json`](network/evidence/prediction_heads_offline.json)。
+离线复查命令：
+
+```powershell
+python project/compiler/test_prediction_heads.py -v
+python test/network/scripts/tests/validate_prediction_heads.py --num 20
+vivado -mode batch -source test/network/scripts/tests/run_gap_sim.tcl
+```
+
+重新生成新增量化资产时，安装 `onnx` 并运行
+`python project/compiler/frontend/prepare_prediction_heads.py`；板端运行不需要 ONNX 或 GPU。
 20+20 张图片用于功能和数值一致性检查，不等同完整 COCO mAP / ImageNet Top-1 测评。
 
 ## Precision

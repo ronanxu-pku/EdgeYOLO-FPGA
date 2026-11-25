@@ -50,7 +50,7 @@ DEFAULT_CONF = 0.25
 
 DEFAULT_YOLO_IMG = NETWORK_DIR / "examples" / "coco" / "000000000139.jpg"
 DEFAULT_RESNET_IMG = NETWORK_DIR / "examples" / "imagenet" / "n01443537_goldfish.JPEG"
-RELEASE_ID = "80832ec_attempt1"
+RELEASE_ID = "prediction_heads_v1"
 COMPILED_DIR = CACHE_DIR / "compiled" / RELEASE_ID
 COCO_YOLO_DIR = REPO_ROOT / "project" / "model" / "yolov5n_coco50k_qat"
 EXAMPLES_DIR = NETWORK_DIR / "examples"

@@ -2232,11 +2232,122 @@
       "has_activation": true,
       "activation": "relu",
       "needs_rescale_input": false
+    },
+    {
+      "name": "detect.0",
+      "type": "conv",
+      "in_channels": 64,
+      "out_channels": 256,
+      "kernel_h": 1,
+      "kernel_w": 1,
+      "stride": [
+        1,
+        1
+      ],
+      "padding": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "group": 1,
+      "weight_shape": [
+        256,
+        1,
+        1,
+        64
+      ],
+      "has_bn": false,
+      "has_activation": false,
+      "input_act_scale": 0.07814328372478485,
+      "in_act_zero_point": 0.0
+    },
+    {
+      "name": "detect.1",
+      "type": "conv",
+      "in_channels": 128,
+      "out_channels": 256,
+      "kernel_h": 1,
+      "kernel_w": 1,
+      "stride": [
+        1,
+        1
+      ],
+      "padding": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "group": 1,
+      "weight_shape": [
+        256,
+        1,
+        1,
+        128
+      ],
+      "has_bn": false,
+      "has_activation": false,
+      "input_act_scale": 0.07814328372478485,
+      "in_act_zero_point": 0.0
+    },
+    {
+      "name": "detect.2",
+      "type": "conv",
+      "in_channels": 256,
+      "out_channels": 256,
+      "kernel_h": 1,
+      "kernel_w": 1,
+      "stride": [
+        1,
+        1
+      ],
+      "padding": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "group": 1,
+      "weight_shape": [
+        256,
+        1,
+        1,
+        256
+      ],
+      "has_bn": false,
+      "has_activation": false,
+      "input_act_scale": 0.07814328372478485,
+      "in_act_zero_point": 0.0
     }
   ],
   "dataset": "coco",
   "num_classes": 80,
   "class_names": "coco",
   "source_quant_onnx": "model\\yolov5n_coco50k_qat\\int8\\best.quant.onnx",
-  "source_onnx": "model\\yolov5n_coco50k_qat\\int8\\best.onnx"
+  "source_onnx": "model\\yolov5n_coco50k_qat\\int8\\best.onnx",
+  "prediction_head": {
+    "version": 1,
+    "kind": "yolo_detect",
+    "heads": [
+      {
+        "layer": "detect.0",
+        "input": "PAN_P3",
+        "output": "DETECT_P3",
+        "valid_c": 255
+      },
+      {
+        "layer": "detect.1",
+        "input": "PAN_P4",
+        "output": "DETECT_P4",
+        "valid_c": 255
+      },
+      {
+        "layer": "detect.2",
+        "input": "PAN_P5",
+        "output": "DETECT_P5",
+        "valid_c": 255
+      }
+    ]
+  }
 }

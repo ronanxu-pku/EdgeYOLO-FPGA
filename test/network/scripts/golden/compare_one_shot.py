@@ -115,7 +115,8 @@ def _conv_dqa_fp32(feat: np.ndarray, meta, npz, mode: str, *, relu: bool = True)
 
 
 def run_yolo_compiler_golden(image_path: Path, mode: str, max_layers: int | None,
-                             parsed_override: str | None = None) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+                             parsed_override: str | None = None, *,
+                             prediction_heads: bool = False) -> tuple[np.ndarray, dict[str, np.ndarray]]:
     unit_run = _load_unit_tb_run()
     parsed_dir = Path(parsed_override) if parsed_override else (
         REPO / "project" / "project" / "model" / "yolov5n_coco50k_qat" / ("parsed_int16" if mode == "int16" else "parsed_int8")
@@ -184,6 +185,18 @@ def run_yolo_compiler_golden(image_path: Path, mode: str, max_layers: int | None
         else:
             raise ValueError(f"unknown schedule action {action!r}")
 
+    if prediction_heads:
+        outputs = {}
+        for head in parsed["prediction_head"]["heads"]:
+            if max_layers is not None and conv_count >= max_layers:
+                break
+            layer = next(x for x in parsed["layers"] if x["name"] == head["layer"])
+            npz = np.load(parsed_dir / "weights" / f"{_safe_name(layer['name'])}.npz")
+            q = _quantize_fp32(named[head["input"]], float(npz["act_scale"]), mode,
+                               reciprocal_multiply=True)
+            cur = _conv_dqa_fp32(q, conv_meta(net, layer["name"]), npz, mode, relu=False)
+            outputs[head["output"]] = cur
+            conv_count += 1
     return cur.astype(np.float32), outputs
 
 
@@ -262,7 +275,8 @@ def _resnet_conv(cur: np.ndarray, net: dict, layer: dict, parsed_dir: Path, mode
 def run_resnet_compiler_golden(image_path: Path, mode: str, max_layers: int | None,
                                parsed_override: str | None = None,
                                quantize_residuals: bool = False,
-                               output_dtype: str = "float32") -> np.ndarray:
+                               output_dtype: str = "float32",
+                               prediction_heads: bool = False) -> np.ndarray:
     parsed_dir = _resnet_parsed_dir(mode, parsed_override)
     network_json = parsed_dir / "network.json"
     network = json.loads(network_json.read_text())
@@ -326,7 +340,20 @@ def run_resnet_compiler_golden(image_path: Path, mode: str, max_layers: int | No
         if conv_count >= n_conv:
             break
 
-    if output_dtype in {"int8", "int16"} and n_conv == len(layers):
+    if prediction_heads and conv_count == 20 and n_conv > 20:
+        head = network["prediction_head"]
+        layer = next(x for x in layers if x["name"] == head["layer"])
+        npz = _resnet_layer_npz(parsed_dir, layer["name"])
+        # Match MP's row-major FP32 accumulation, including each rounding.
+        flat = cur.reshape(-1, cur.shape[-1])
+        sums = np.zeros(cur.shape[-1], np.float32)
+        for row in flat:
+            sums = (sums + row).astype(np.float32)
+        q = _quantize_fp32(sums.reshape(1, 1, -1),
+                           len(flat) * float(head["input_act_scale"]), mode,
+                           reciprocal_multiply=True)
+        return _conv_dqa_fp32(q, conv_meta(net, layer["name"]), npz, mode, relu=False)
+    if output_dtype in {"int8", "int16"} and n_conv >= 20 and conv_count == 20:
         scale = add_scales.get("layer4.1.Add")
         if scale is None:
             raise ValueError("missing ResNet final Add scale for integer output compare")
@@ -512,6 +539,7 @@ def compute_golden_refs(
         Path(image), network_name, mode, max_layers, parsed_path,
         has_qdq=has_qdq, output_dtype=output_dtype,
     )
+    identity["host_boundary"] = host.get("boundary", "backbone_features")
     cache_dir = Path(golden_cache_dir) if golden_cache_dir else None
     if golden_mode != "compute" and cache_dir is not None:
         golden_t0 = time.perf_counter()
@@ -535,11 +563,13 @@ def compute_golden_refs(
             Path(image), mode, max_layers, parsed_dir,
             quantize_residuals=has_qdq,
             output_dtype=output_dtype,
+            prediction_heads=host.get("boundary") == "classification_logits",
         )
         named_refs: dict[str, np.ndarray] = {}
     else:
         primary_ref, named_refs = run_yolo_compiler_golden(
             Path(image), mode, max_layers, yolo_parsed_dir,
+            prediction_heads=host.get("boundary") == "detection_logits",
         )
     print(f"golden compute {time.perf_counter() - golden_t0:.3f}s", flush=True)
     if cache_dir is not None:
