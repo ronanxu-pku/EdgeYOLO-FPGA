@@ -123,8 +123,8 @@ JSON 保存预测结果、置信度/得分、检测框，以及 FPGA 回读和�
 每组同时记录张量形状、FPGA 原始数据类型、最大绝对误差和是否通过，`comparison.atol` 记录比对阈值。
 YOLO 的框使用原图像素坐标 `xyxy`；ResNet 的得分是 logit，不是概率。
 
-编译缓存缺失时自动编译。此次扩展使用 `cached/compiled/prediction_heads_v1/`，
-首次运行会重新编译，避免使用旧的主干输出程序。主机参考值在 FPGA 执行后计算并校验。
+编译缓存缺失时自动编译。此次扩展使用 `cached/compiled/prediction_heads_v2/`，
+首次运行会重新编译。入口检查完整层数、精度及 logits 输出边界，旧主干程序不会进入硬件执行。主机参考值在 FPGA 执行后计算并校验。
 
 `test-top-network-extend` 分支复用现有 RTL 与 `top.bit/top.ltx`，执行边界为：
 
@@ -144,17 +144,20 @@ QA 使用 `1/(49×0.125)`，DQA 使用 `0.125×2^-8`，FC 偏置保持原值。
 均与原主机尾部一致。GAP 新增舍入导致 ResNet logit 最大差异约 0.242。
 未修改的 GAP RTL 已通过 XSim + Xilinx 浮点 IP 仿真（7×7×512、1×1×8、3×5×12）。
 上述为离线验证；本分支的完整程序仍需上板确认。
-逐图结果与新增权重 SHA-256 见 [`prediction_heads_offline.json`](network/evidence/prediction_heads_offline.json)。
-离线复查命令：
+检测头权重已合入原 `model_24_m_0/1/2.npz`，FC 权重已合入原 `fc.npz`，
+无需额外的 `detect_*.npz` 或 `fc_fpga.npz`。其中 `weight_int8` 使用编译器统一的 OHWI 布局，
+按精度保存 INT8/INT16；原 Host 参考权重字段保留在同一文件中。
+独立的网络仿真、离线验证脚本和历史结果文件已移除；`run.py` 使用的 golden 比对保留。
+
+模型资产生成逻辑合入原解析器。YOLO 的 `parse_quant_export.py` 一次导出完整网络；
+已有 VAI ResNet 资产可用下面的命令重新生成 FC 字段（替换为对应精度目录）：
 
 ```powershell
-python project/compiler/test_prediction_heads.py -v
-python test/network/scripts/tests/validate_prediction_heads.py --num 20
-vivado -mode batch -source test/network/scripts/tests/run_gap_sim.tcl
+python project/compiler/frontend/parse_resnet18_qdq.py --prepare-vai-tail project/model/resnet18/parsed_vai
+python project/compiler/frontend/parse_resnet18_qdq.py --prepare-vai-tail project/model/resnet18/parsed_vai_int16_widened
 ```
 
-重新生成新增量化资产时，安装 `onnx` 并运行
-`python project/compiler/frontend/prepare_prediction_heads.py`；板端运行不需要 ONNX 或 GPU。
+重建模型资产需要 ONNX；板端 `run.py` 直接使用已包含的解析资产，不需要 ONNX 或 GPU。
 20+20 张图片用于功能和数值一致性检查，不等同完整 COCO mAP / ImageNet Top-1 测评。
 
 ## Precision
@@ -244,10 +247,6 @@ TOPS 还保留 `--repeat-count`、`--staging preload|hbm`（默认 preload）、
 
 ```powershell
 python -m unittest discover -s test/utils/ila/tests -v
-python -m unittest discover -s test/network/scripts/tests -v
-python project/compiler/test_int16_contract.py
-python project/compiler/test_resnet_native_int16_frontend.py
-python project/compiler/check_release_repro.py
 ```
 
 2026-11-23 用户反馈 Combined 上板测试通过，随后统一发布为 `top.bit/top.ltx`。

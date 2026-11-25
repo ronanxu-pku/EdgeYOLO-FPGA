@@ -10,7 +10,8 @@
     python test/network/run.py --model resnet --precision int16 --num 1
     python test/network/run.py --model all --precision both --num 20
 
-启动时检查编译缓存，缺少产物时自动编译。FPGA 跑完后在主机计算 compiler golden 并比对。
+启动时检查完整网络的编译缓存，缺少产物或输出边界不符时自动编译。
+FPGA 执行至 YOLO Detect / ResNet GAP+FC；主机完成后处理，并计算完整 golden 比对。
 单图打印推理和比对结果，批量测试保留详细终端日志。
 
 硬件运行要求 FPGA 已烧录与网络测试兼容的设计，并已安装 Xilinx XDMA 驱动。
@@ -50,7 +51,7 @@ DEFAULT_CONF = 0.25
 
 DEFAULT_YOLO_IMG = NETWORK_DIR / "examples" / "coco" / "000000000139.jpg"
 DEFAULT_RESNET_IMG = NETWORK_DIR / "examples" / "imagenet" / "n01443537_goldfish.JPEG"
-RELEASE_ID = "prediction_heads_v1"
+RELEASE_ID = "prediction_heads_v2"
 COMPILED_DIR = CACHE_DIR / "compiled" / RELEASE_ID
 COCO_YOLO_DIR = REPO_ROOT / "project" / "model" / "yolov5n_coco50k_qat"
 EXAMPLES_DIR = NETWORK_DIR / "examples"
@@ -62,13 +63,11 @@ XDMA_READ_CHUNK_BYTES = 65536
 
 ONE_SHOT_DEFAULT_BUILDS = {
     ("resnet", "vai"): COMPILED_DIR / "resnet18_int8",
-    ("resnet", "int16"): COMPILED_DIR / "resnet18_int16_native",
     ("resnet", "int16_widened"): COMPILED_DIR / "resnet18_int16_widened",
 }
 
 ONE_SHOT_COMPILE_PARSED = {
     ("resnet", "vai"): REPO_ROOT / "project" / "model" / "resnet18" / "parsed_vai",
-    ("resnet", "int16"): REPO_ROOT / "project" / "model" / "resnet18" / "parsed_int16",
     ("resnet", "int16_widened"): REPO_ROOT / "project" / "model" / "resnet18" / "parsed_vai_int16_widened",
 }
 
@@ -282,11 +281,6 @@ def _one_shot_tag(network: str, precision: str) -> str:
     return precision
 
 
-def _resnet_int16_internal() -> str:
-    native = ONE_SHOT_COMPILE_PARSED[("resnet", "int16")] / "network.json"
-    return "int16" if native.is_file() else "int16_widened"
-
-
 def _expand_precisions(raw: str, network: str) -> list[str]:
     wanted = ["int8", "int16"] if raw == "both" else [raw]
     if network == "yolo":
@@ -296,7 +290,8 @@ def _expand_precisions(raw: str, network: str) -> list[str]:
         if item == "int8":
             mapped.append("vai")
         else:
-            mapped.append(_resnet_int16_internal())
+            # The bundled full-network INT16 workload uses the VAI widened model.
+            mapped.append("int16_widened")
     return mapped
 
 
@@ -308,9 +303,33 @@ def _hardware_mode(network: str, precision: str) -> str:
     return precision
 
 
-def _one_shot_cache_ready(build_dir: Path) -> bool:
+def _require_fpga_predictions(plan: dict, network: str, precision: str) -> None:
+    """Reject backbone-only, partial, or mismatched programs before hardware I/O."""
+    expected_boundary = "detection_logits" if network == "yolo" else "classification_logits"
+    expected_layers = 60 if network == "yolo" else 21
+    host = plan.get("host_io", {})
+    meta = plan.get("compile_meta", {})
+    if (host.get("boundary") != expected_boundary
+            or meta.get("num_conv_layers_compiled") != expected_layers
+            or meta.get("num_conv_layers_total") != expected_layers
+            or plan.get("mode") != _hardware_mode(network, precision)
+            or plan.get("unsupported")):
+        raise ValueError(f"{network}: requires a full FPGA program ending at {expected_boundary}")
+    if network == "yolo":
+        outputs = host.get("outputs", [])
+        expected = [(f"DETECT_P{i}", [hw, hw], 256, 255) for i, hw in ((3, 40), (4, 20), (5, 10))]
+        actual = [(item.get("name"), item.get("hw"), item.get("c"), item.get("valid_c")) for item in outputs]
+        if actual != expected or any(item.get("dtype") != "float32" for item in outputs):
+            raise ValueError("YOLO requires all three FPGA Detect outputs")
+    elif (host.get("output_hw") != [1, 1] or host.get("output_c") != 1008
+          or host.get("valid_c") != 1000 or host.get("output_dtype") != "float32"):
+        raise ValueError("ResNet requires FPGA GAP/FC output with 1000 valid logits")
+
+
+def _one_shot_cache_ready(build_dir: Path, network: str, precision: str) -> bool:
     try:
         plan = json.loads((build_dir / "plan.json").read_text())
+        _require_fpga_predictions(plan, network, precision)
         manifest_path = build_dir / "program_manifest.json"
         if manifest_path.is_file():
             segments = json.loads(manifest_path.read_text())["segments"]
@@ -330,7 +349,7 @@ def _one_shot_cache_ready(build_dir: Path) -> bool:
 
 def _ensure_one_shot_artifact(network: str, precision: str, build_dir: Path,
                               parsed_dir: Path) -> None:
-    if _one_shot_cache_ready(build_dir):
+    if _one_shot_cache_ready(build_dir, network, precision):
         return
 
     label = f"{network.upper()} {_one_shot_tag(network, precision).upper()}"
@@ -348,6 +367,8 @@ def _ensure_one_shot_artifact(network: str, precision: str, build_dir: Path,
     if precision == "int16_widened":
         cmd.append("--allow-widened-int16")
     _run_checked(cmd)
+    if not _one_shot_cache_ready(build_dir, network, precision):
+        raise RuntimeError(f"compiler did not produce a complete FPGA prediction program: {build_dir}")
 
 
 def run_one_shot_fpga(
@@ -362,14 +383,14 @@ def run_one_shot_fpga(
     conf: float = DEFAULT_CONF,
     session=None,
 ) -> Path:
-    """Run a full one-shot FPGA workload, compare features, and run the host boundary."""
+    """Run a full one-shot FPGA workload, compare logits, and run postprocessing."""
     tag = _one_shot_tag(network, precision)
     batch = session is not None
     yolo_parsed_dir = parsed_dir if network == "yolo" else None
     resnet_parsed_dir = parsed_dir if network == "resnet" else None
     label = f"{'YOLO' if network == 'yolo' else 'ResNet'} {tag.upper()}"
-    # Selected attempt1 board validation measured native COCO W16A16 PAN
-    # max_abs <= 0.00930. Other maintained paths pass the strict 1e-3 gate.
+    # Retain the existing numerical tolerances. Prediction logits are checked
+    # against the full-network golden; board acceptance is reported per run.
     compare_atol = 1e-2 if network == "yolo" and precision == "int16" else 1e-3
     if session is None:
         _ensure_one_shot_artifact(network, precision, build_dir, parsed_dir)
@@ -377,6 +398,7 @@ def run_one_shot_fpga(
     result_img = out_dir / f"result_{image_index}.png"
     result_json = out_dir / f"result_{image_index}.json"
     plan = json.loads((build_dir / "plan.json").read_text())
+    _require_fpga_predictions(plan, network, precision)
     named_outputs = bool(plan.get("host_io", {}).get("outputs"))
 
     import compare_one_shot

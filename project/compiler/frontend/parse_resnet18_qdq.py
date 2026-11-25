@@ -3,6 +3,8 @@
 Parse a signed, symmetric QDQ-quantized ResNet18 ONNX and produce the schema
 consumed by lower.py + compile.py.  Both W8A8 and native W16A16 models are
 accepted; INT16 tensors are preserved and are never narrowed to INT8.
+For an existing VAI export, --prepare-vai-tail adds the FPGA GAP/FC
+metadata and integer FC arrays to its original fc.npz.
 
 Output:
     project/model/resnet18/parsed_qdq/
@@ -403,8 +405,54 @@ def _json_default(obj):
     raise TypeError(f"unserializable {type(obj)}")
 
 
+def prepare_vai_tail(parsed: Path) -> dict:
+    """Add GAP/FC metadata and FPGA arrays to an existing VAI fc.npz."""
+    net = json.loads((parsed / "network.json").read_text())
+    net["layers"] = [x for x in net["layers"] if x["name"] not in {"fc", "fc.fpga"}]
+    with np.load(parsed / "weights/fc.npz") as z:
+        original = {key: z[key] for key in ("weight", "bias")}
+        weight, bias = original["weight"].astype(np.float32).T, original["bias"].astype(np.float32)
+    # VAI's bundled FC is already quantized at 2^-8. Recover it exactly.
+    weight_scale = np.float32(2.0 ** -8)
+    q = np.rint(weight / weight_scale)
+    if q.min() < -128 or q.max() > 127 or not np.array_equal(q * weight_scale, weight):
+        raise ValueError("FC is not the bundled VAI W8 power-of-two grid; recalibration required")
+    dtype = np.int16 if net.get("int16_from_int8") or "widened" in parsed.name else np.int8
+    valid_c, cin = weight.shape
+    padded_c = (valid_c + 15) // 16 * 16
+    pad = padded_c - valid_c
+    scales_path = parsed / "add_output_scales.json"
+    if not scales_path.exists():
+        scales_path = parsed.parent / "parsed_vai/add_output_scales.json"
+    act_scale = float(json.loads(scales_path.read_text())["layer4.1.Add"])
+    np.savez_compressed(
+        parsed / "weights/fc.npz", **original,
+        weight_int8=np.pad(q.astype(dtype), ((0, pad), (0, 0)))[:, None, None, :],
+        weight_scale=np.pad(np.full(valid_c, weight_scale, np.float32), (0, pad)),
+        weight_zero_point=np.array(0, np.int32), act_scale=np.float32(act_scale),
+        dqa_scale=np.pad(np.full(valid_c, act_scale * weight_scale, np.float32), (0, pad)),
+        dqa_bias=np.pad(bias, (0, pad)),
+    )
+    net["layers"].append({
+        "name": "fc", "type": "conv", "in_channels": cin, "out_channels": padded_c,
+        "kernel_h": 1, "kernel_w": 1, "stride": [1, 1], "padding": [0, 0, 0, 0],
+        "group": 1, "weight_shape": [padded_c, 1, 1, cin], "has_bn": False,
+        "has_activation": False, "input_act_scale": act_scale, "in_act_zero_point": 0.0,
+    })
+    net["prediction_head"] = {
+        "version": 1, "kind": "resnet_gap_fc", "layer": "fc",
+        "valid_c": valid_c, "input_act_scale": act_scale,
+        "gap_quantization": "round(sum_fp32 / (H*W*input_act_scale))",
+        "weight_scale": float(weight_scale),
+    }
+    (parsed / "network.json").write_text(json.dumps(net, indent=2) + "\n")
+    return {"model": parsed.name, "fc_weight_max_abs_error": 0.0, "fc_weight_scale": float(weight_scale), "gap_input_scale": act_scale}
+
+
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--prepare-vai-tail", type=Path,
+                    help="update an existing parsed VAI directory with FPGA GAP/FC assets")
     ap.add_argument("--onnx", default=None,
                     help="QDQ resnet18 ONNX (default: project/model/resnet18/resnet18_w8a8.onnx)")
     ap.add_argument("--mode", choices=["auto", "int8", "int16"], default="auto",
@@ -412,6 +460,9 @@ def main():
     ap.add_argument("--output", default=None,
                     help="output dir (default: project/model/resnet18/parsed_qdq)")
     args = ap.parse_args()
+    if args.prepare_vai_tail is not None:
+        print(json.dumps(prepare_vai_tail(args.prepare_vai_tail), indent=2))
+        return
 
     repo = Path(__file__).resolve().parents[3]
     onnx_path = args.onnx or str(repo / "project" / "project" / "model" / "resnet18" / "resnet18_w8a8.onnx")

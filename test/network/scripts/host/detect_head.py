@@ -1,18 +1,10 @@
-"""
-YOLOv5n 检测头 (model.24) — Host 端实现
+"""YOLOv5 prediction postprocessing and optional host reference convolutions.
 
-检测头在 host CPU 上执行（非 FPGA），接收 backbone+neck 的 INT8 输出，
-执行 3 个 1×1 Conv（无 ReLU、无再量化），输出 FP32 预测结果。
+The network run.py uses postprocess_only=True: FPGA supplies all three Detect
+logit tensors; this module performs sigmoid, decoding, filtering and NMS.
+The default constructor retains the host reference for other callers.
 
-输出格式 (每个尺度)：
-  shape = (H, W, num_anchors, num_classes + 5)
-  = (H, W, 3, 8)  # 3 anchors × (4 bbox + 1 obj + 3 classes)
-
-用法：
-    from detect_head import DetectHead
-    head = DetectHead('project/model/yolov5n_coco50k_qat/parsed_int8/weights')
-    raw_preds = head.forward(feat_p3, feat_p4, feat_p5)
-    boxes = head.postprocess(raw_preds, conf_thres=0.25, iou_thres=0.45)
+Each prediction tensor has shape (H, W, 3, num_classes + 5).
 """
 import numpy as np
 from pathlib import Path
@@ -35,20 +27,19 @@ NUM_ANCHORS = 3
 
 
 class DetectHead:
-    """YOLOv5 Detect Head — host (CPU) implementation."""
+    """YOLOv5 postprocessing with an optional host convolution reference."""
 
-    def __init__(self, weights_dir: str):
+    def __init__(self, weights_dir: str, *, postprocess_only: bool = False):
         wdir = Path(weights_dir)
 
         # Load network config to get the detect head input act_scale.
         # The correct act_scale is the output activation scale of model.17/20/23
         # cv3.conv (the layers feeding into detect head), stored in network.json.
-        # NOTE: the 'act_scale' field inside model_24_m_*.npz is the DCIM hard-quant
-        # scale (1/127 ≈ 0.007874), NOT the backbone activation scale — do NOT use it.
+        # Read scales from the network for both legacy and combined NPZ assets.
         import json
         net_json = wdir.parent / 'network.json'
         if net_json.exists():
-            net_cfg = json.load(open(str(net_json)))
+            net_cfg = json.loads(net_json.read_text(encoding="utf-8"))
             self.num_classes = int(net_cfg.get("num_classes", NUM_CLASSES))
             layers_dict = {l["name"]: l for l in net_cfg.get("layers", [])}
             feed_layers = ["model.17.cv3.conv", "model.20.cv3.conv", "model.23.cv3.conv"]
@@ -58,6 +49,8 @@ class DetectHead:
             self.num_classes = NUM_CLASSES
             det_scales = []
         self.out_channels = NUM_ANCHORS * (self.num_classes + 5)
+        if postprocess_only:
+            return
 
         # Fallback default (INT8 QONNX scale for yolov5n)
         default_scale = 0.07814328372478485
@@ -66,7 +59,6 @@ class DetectHead:
         for i in range(3):
             npz = np.load(wdir / f'model_24_m_{i}.npz')
             # Use the network.json-derived per-scale (accurate backbone output scale).
-            # Do NOT use npz['act_scale']: it stores the DCIM hard-quant scale (≈1/127).
             act_scale = det_scales[i] if i < len(det_scales) else default_scale
             if 'weight_fp32' in npz:
                 self.convs.append({
