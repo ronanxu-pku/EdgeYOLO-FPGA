@@ -2,11 +2,13 @@
 
 仓库包含 PT/ONNX/解析模型以及 20+20 张测试图片。
 同一批次的图片结果写到 ``test/network/output/<模型>_<精度>_<执行时间>/``。
-每张图保存 ``result_<图片编号>.png/json``；编译缓存和中间数据放在 ``cached/``。
+清单图片保存 ``result_<图片编号>.png/json``，指定图片保存 ``result.png`` 和
+``result.json``。编译缓存和中间数据放在 ``cached/``。
 
 常用命令::
 
     python test/network/run.py --model yolo --precision int8 --num 1
+    python test/network/run.py --model yolo --precision int8 --image photos/bus.jpg
     python test/network/run.py --model resnet --precision int16 --num 1
     python test/network/run.py --model all --precision both --num 20
 
@@ -377,7 +379,7 @@ def run_one_shot_fpga(
     img_path: Path,
     out_dir: Path,
     *,
-    image_index: int,
+    image_index: int | None,
     build_dir: Path,
     parsed_dir: Path,
     conf: float = DEFAULT_CONF,
@@ -395,8 +397,9 @@ def run_one_shot_fpga(
     if session is None:
         _ensure_one_shot_artifact(network, precision, build_dir, parsed_dir)
 
-    result_img = out_dir / f"result_{image_index}.png"
-    result_json = out_dir / f"result_{image_index}.json"
+    result_stem = "result" if image_index is None else f"result_{image_index}"
+    result_img = out_dir / f"{result_stem}.png"
+    result_json = out_dir / f"{result_stem}.json"
     plan = json.loads((build_dir / "plan.json").read_text())
     _require_fpga_predictions(plan, network, precision)
     named_outputs = bool(plan.get("host_io", {}).get("outputs"))
@@ -667,13 +670,20 @@ def parse_args() -> argparse.Namespace:
                     help="选择模型（默认 all）")
     ap.add_argument("--precision", choices=["int8", "int16", "both"], default="both",
                     help="选择精度（默认 both）")
-    ap.add_argument("--num", type=int, default=1, metavar="N",
-                    help="每组图片数（1–20，默认 1）")
+    inputs = ap.add_mutually_exclusive_group()
+    inputs.add_argument("--num", type=int, default=1, metavar="N",
+                        help="每组清单图片数（1–20，默认 1）")
+    inputs.add_argument("--image", type=Path, metavar="PATH",
+                        help="指定单张输入图片，保存 result.png 和 result.json")
     ap.add_argument("--conf", type=float, default=DEFAULT_CONF,
                     help="YOLO检测置信度阈值（0–1，默认 0.25）")
     args = ap.parse_args()
     if not 1 <= args.num <= 20:
         ap.error("--num must be an integer from 1 to 20")
+    if args.image is not None:
+        args.image = args.image.expanduser().resolve()
+        if not args.image.is_file():
+            ap.error(f"image file not found: {args.image}")
     if not 0.0 <= args.conf <= 1.0:
         ap.error("--conf must be a finite number from 0 to 1")
     return args
@@ -703,13 +713,17 @@ def main() -> int:
 
     yolo_profile = YOLO_ONE_SHOT_PROFILES["coco"]
     for network in networks:
-        image = yolo_profile["image"] if network == "yolo" else DEFAULT_RESNET_IMG
-        manifest = COCO_MANIFEST if network == "yolo" else IMAGENET_MANIFEST
-        _, examples = _load_examples(manifest, 20)
-        example = next((item for item in examples if item["path"] == image), None)
-        if example is None:
-            print(f"  [ERROR] default image not listed in {manifest}: {image.name}")
-            return 1
+        image = args.image
+        image_index = None
+        if image is None:
+            image = yolo_profile["image"] if network == "yolo" else DEFAULT_RESNET_IMG
+            manifest = COCO_MANIFEST if network == "yolo" else IMAGENET_MANIFEST
+            _, examples = _load_examples(manifest, 20)
+            example = next((item for item in examples if item["path"] == image), None)
+            if example is None:
+                print(f"  [ERROR] default image not listed in {manifest}: {image.name}")
+                return 1
+            image_index = example["index"]
 
         precisions = yolo_precisions if network == "yolo" else resnet_precisions
         for precision in precisions:
@@ -722,7 +736,7 @@ def main() -> int:
             try:
                 run_one_shot_fpga(
                     network, precision, image, _result_dir(network, precision, run_time),
-                    image_index=example["index"],
+                    image_index=image_index,
                     build_dir=build_dir,
                     parsed_dir=parsed_dir,
                     conf=args.conf,
